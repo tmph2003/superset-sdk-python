@@ -48,6 +48,7 @@ DIALECT_MAP = {
     MFSQLEngine.POSTGRES: "postgres",
     MFSQLEngine.SNOWFLAKE: "snowflake",
     MFSQLEngine.DATABRICKS: "databricks",
+    MFSQLEngine.TRINO: "trino",
 }
 
 

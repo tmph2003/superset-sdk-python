@@ -314,6 +314,7 @@ class ConnectionType(str, Enum):
     snowflake = "snowflake"
     bigquery = "bigquery"
     adapter = "adapter"
+    trino = "trino"
 
 
 class ConnectionSchema(PostelSchema):
@@ -630,6 +631,7 @@ class MFSQLEngine(str, Enum):
     POSTGRES = "POSTGRES"
     SNOWFLAKE = "SNOWFLAKE"
     DATABRICKS = "DATABRICKS"
+    TRINO = "TRINO"
 
 
 class MFMetricWithSQLSchema(MFMetricSchema):
