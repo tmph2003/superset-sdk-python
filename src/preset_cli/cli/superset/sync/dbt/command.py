@@ -7,7 +7,7 @@ import os.path
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+import os
 import click
 import yaml
 from yarl import URL
@@ -36,7 +36,7 @@ from preset_cli.cli.superset.sync.dbt.metrics import (
 )
 from preset_cli.exceptions import CLIError, DatabaseNotFoundError
 from preset_cli.lib import raise_cli_errors
-
+os.environ["PYTHONIOENCODING"] = "utf-8"
 _logger = logging.getLogger(__name__)
 
 
