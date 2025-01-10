@@ -22,7 +22,7 @@ You can also install from ``main``, if you need recent features:
 
 .. code-block:: bash
 
-     $ pip install "git+https://github.com/preset-io/backend-sdk.git"
+     $ pip install "git+https://github.com/tmph2003/superset-sdk-python.git"
 
 Authentication
 ==============
