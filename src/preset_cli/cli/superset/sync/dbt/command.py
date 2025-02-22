@@ -387,7 +387,7 @@ def get_sl_metric(
             "Using `mf` command to retrieve SQL syntax for metric %s",
             metric["name"],
         )
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf-8", env=os.environ, errors="ignore")
     except FileNotFoundError:
         _logger.warning(
             "`mf` command not found, if you're using Metricflow make sure you have it "
@@ -400,7 +400,6 @@ def get_sl_metric(
             metric["name"],
         )
         return None
-
     output = result.stdout.strip()
     start = output.find("SELECT")
     sql = output[start:]
