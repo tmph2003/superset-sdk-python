@@ -5,7 +5,8 @@ This tool is a command line interface (CLI) to interact with your Preset workspa
 ## Installation
 
 ```
-pip install "git+https://gitlab.hebela.vn/data/semantic-layer-tool.git"
+# Redirect to repo folder
+pip install .
 ```
 ## Usage
 The following commands are currently available:
@@ -18,17 +19,15 @@ The following commands are currently available:
 - ``superset-cli export-users``: export users (name, username, email, roles) into a YAML file.
 - ``superset-cli sync native`` (alternatively, ``superset-cli import-assets``): synchronize the workspace from a directory of templated configuration files.
 - ``superset-cli sync dbt-core``: synchronize the workspace from a dbt Core project.
-- ``superset-cli sync dbt-cloud``: synchronize the workspace from a dbt Cloud project.
 
 #### Synchronizing to and from dbt
 The CLI also allows you to synchronize models, and metrics from a dbt project.
 
 ``` bash
 
-   % superset-cli  --jwt-token=JWT_TOEKN https://dev.bi.hebela.vn/ \
-   > sync dbt-core --project=my_project --target=dev --profiles=profiles.yml \
-   > /path/to/dbt/my_project/target/manifest.json \
-   > --external-url-prefix=http://localhost:8080/
+   % superset-cli  --jwt-token=JWT_TOEKN https://<superset-url>/ \
+   > sync dbt-core --project=my_project --profile=my_profile --target=dev --profiles=profiles.yml \
+   > /path/to/dbt/my_project/target/manifest.json
 ```
 
 Running this command will:

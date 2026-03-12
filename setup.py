@@ -1,5 +1,5 @@
 """
-    Setup file for preset-cli.
+    Setup file for superset-cli.
     Use setup.cfg to configure your project.
 
     This file was generated with PyScaffold 4.1.4.

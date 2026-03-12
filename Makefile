@@ -10,14 +10,11 @@ pyenv: .python-version
 	pip install -e '.[testing]'
 	touch .python-version
 
-test: pyenv
-	pytest --cov=src/preset_cli -vv tests/ --doctest-modules src/preset_cli
-
 clean:
 	pyenv virtualenv-delete backend-sdk
 
 spellcheck:
-	codespell -S "*.json" src/preset_cli docs/*rst tests templates
+	codespell -S "*.json" src/superset_cli docs/*rst tests templates
 
 requirements.txt: .python-version requirements.in setup.cfg
 	pip install --upgrade pip

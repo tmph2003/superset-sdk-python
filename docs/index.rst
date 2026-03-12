@@ -1,8 +1,8 @@
 ==========
-preset-cli
+superset-cli
 ==========
 
-This is the documentation of **preset-cli**.
+This is the documentation of **superset-cli**.
 
 .. note::
 
