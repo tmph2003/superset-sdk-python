@@ -23,11 +23,8 @@ The following commands are currently available:
 #### Synchronizing to and from dbt
 The CLI also allows you to synchronize models, and metrics from a dbt project.
 
-``` bash
-
-   % superset-cli  --jwt-token=JWT_TOEKN https://<superset-url>/ \
-   > sync dbt-core --project=my_project --profile=my_profile --target=dev --profiles=profiles.yml \
-   > /path/to/dbt/my_project/target/manifest.json
+```bash
+% superset-cli  --username admin --password admin https://superset-dev.sunhouse.com.vn/ sync dbt-core --select models/marts/ --project=test_semantic_layer --profile=sunhouse_etl_pipeline --target=trino --profiles=profiles.yml target/manifest.json
 ```
 
 Running this command will:

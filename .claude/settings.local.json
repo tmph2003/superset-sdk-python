@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/phuongtm1/.claude/plugins/cache/understand-anything/understand-anything/1.0.5/packages/dashboard/**)",
+      "Bash(npm install:*)",
+      "Bash(cd \"C:\\\\Users\\\\phuongtm1\\\\Desktop\\\\cube-test\\\\superset-sdk-python\" && python -m py_compile src/superset_cli/cli/superset/sync/dbt/grain_aware.py)",
+      "Bash(python -c \"from superset_cli.cli.superset.sync.dbt.command import process_derived_metric_with_grain_awareness; print\\(''Import OK''\\)\")"
+    ]
+  },
+  "enabledPlugins": {
+    "understand-anything@understand-anything": true
+  }
+}

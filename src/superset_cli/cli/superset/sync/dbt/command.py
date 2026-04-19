@@ -12,6 +12,9 @@ import click
 import yaml
 from yarl import URL
 
+from collections import defaultdict
+from sql_metadata import Parser
+from datetime import datetime
 from superset_cli.api.clients.dbt import (
     MFMetricWithSQLSchema,
     MFSQLEngine,
@@ -125,6 +128,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
     """
     Sync models/metrics from dbt Core to Superset and charts/dashboards to dbt exposures.
     """
+    start_time = datetime.now()
     auth = ctx.obj["AUTH"]
     url = URL(ctx.obj["INSTANCE"])
     client = SupersetClient(url, auth)
@@ -187,7 +191,6 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
     models = []
     for config in configs["nodes"].values():
         if config["resource_type"] == "model":
-            # conform to the same schema that dbt Cloud uses for models
             unique_id = config["uniqueId"] = config["unique_id"]
             config["children"] = configs["child_map"][unique_id]
             config["columns"] = list(config["columns"].values())
@@ -275,6 +278,19 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
 
     if deprecation_notice and raise_failures:
         raise CLIError("Review deprecation warnings", 1)
+    
+    duration = datetime.now() - start_time
+    metrics_count = sum(len(v) for v in superset_metrics.values())
+
+    _logger.info(
+        "\nDbt sync completed in %s\n"
+        "Datasets: %d completed, %d failures\n"
+        "Metrics: %d",
+        duration,
+        len(datasets),
+        len(failures),
+        metrics_count,
+    )
 
 
 def get_sl_metric(
