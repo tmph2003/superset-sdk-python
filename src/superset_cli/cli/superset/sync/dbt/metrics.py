@@ -252,60 +252,155 @@ def get_superset_metrics_per_model(
     return superset_metrics
 
 
+def wrap_with_where(ast: exp.Expression, where_condition: exp.Expression) -> exp.Expression:
+    """
+    Wrap the top-level aggregations in `ast` with a CASE WHEN `where_condition` THEN ... END.
+    If there are no aggregations, wrap the entire expression.
+    """
+    aggs = (exp.Sum, exp.Max, exp.Min, exp.Avg, exp.Count)
+
+    has_agg = False
+    for node in list(ast.find_all(aggs)):
+        is_top_level = True
+        parent = node.parent
+        while parent:
+            if isinstance(parent, aggs):
+                is_top_level = False
+                break
+            parent = parent.parent
+            
+        if is_top_level:
+            has_agg = True
+            arg = node.this
+            if isinstance(arg, exp.Distinct):
+                inner_exprs = arg.expressions
+                case_expr = exp.Case(
+                    ifs=[exp.If(this=where_condition.copy(), true=inner_exprs[0])]
+                )
+                arg.set("expressions", [case_expr] + inner_exprs[1:])
+            else:
+                if isinstance(node, exp.Count) and isinstance(arg, exp.Star):
+                    arg = exp.Literal.number(1)
+                case_expr = exp.Case(ifs=[exp.If(this=where_condition.copy(), true=arg)])
+                node.set("this", case_expr)
+
+    if has_agg:
+        return ast
+    
+    return exp.Case(ifs=[exp.If(this=where_condition.copy(), true=ast)])
+
+
 def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
     """
     Convert a MetricFlow compiled SQL to a projection.
+
+    Handles both single-table and multi-table (JOIN in subqueries) queries.
+    Evaluates scopes bottom-up to resolve aliases and push WHERE clauses into 
+    CASE statements.
     """
-    parsed_query = parse_one(sql, dialect=DIALECT_MAP.get(dialect))
+    dialect_str = DIALECT_MAP.get(dialect)
+    parsed_query = parse_one(sql, dialect=dialect_str)
 
-    # extract aliases from inner query
     scopes = traverse_scope(parsed_query)
-    has_subquery = len(scopes) > 1
-    aliases = extract_aliases(scopes[0].expression) if has_subquery else {}
+    
+    for scope in scopes:
+        scope.exports = {}
+        
+        # 1. Build available columns from source scopes
+        available_columns = {}
+        for alias, source in scope.sources.items():
+            if hasattr(source, "exports"):
+                for col, ast in source.exports.items():
+                    available_columns[(alias, col)] = ast
+                    available_columns[(None, col)] = ast
+                    
+        # 3. Handle WHERE condition
+        where_expr = scope.expression.args.get("where")
+        where_condition = None
+        if where_expr:
+            where_condition = where_expr.this.copy()
+            for column_node in list(where_condition.find_all(exp.Column)):
+                col_name = column_node.name
+                table_name = column_node.table if column_node.table else None
+                key = (table_name, col_name)
+                if key in available_columns:
+                    column_node.replace(available_columns[key].copy())
+                elif (None, col_name) in available_columns:
+                    column_node.replace(available_columns[(None, col_name)].copy())
+                else:
+                    # Fallback: MetricFlow sometimes appends metric types (e.g., _sum) to outer aliases
+                    for avail_table, avail_col in available_columns.keys():
+                        if avail_col and col_name != avail_col and (col_name.startswith(avail_col + "_") or avail_col.startswith(col_name + "_")):
+                            column_node.replace(available_columns[(avail_table, avail_col)].copy())
+                            break
+            
+        # 4. Process SELECT expressions and apply substitutions / WHERE wrapping
+        if isinstance(scope.expression, exp.Select):
+            for proj in scope.expression.expressions:
+                if isinstance(proj, exp.Alias):
+                    exported_name = proj.alias
+                    val_ast = proj.this.copy()
+                else:
+                    exported_name = proj.name
+                    val_ast = proj.copy()
+                    
+                for column_node in list(val_ast.find_all(exp.Column)):
+                    col_name = column_node.name
+                    table_name = column_node.table if column_node.table else None
+                    key = (table_name, col_name)
+                    if key in available_columns:
+                        column_node.replace(available_columns[key].copy())
+                    elif (None, col_name) in available_columns:
+                        column_node.replace(available_columns[(None, col_name)].copy())
+                    else:
+                        for avail_table, avail_col in available_columns.keys():
+                            if avail_col and col_name != avail_col and (col_name.startswith(avail_col + "_") or avail_col.startswith(col_name + "_")):
+                                column_node.replace(available_columns[(avail_table, avail_col)].copy())
+                                break
+                
+                if where_condition:
+                    val_ast = wrap_with_where(val_ast, where_condition)
+                    
+                scope.exports[exported_name] = val_ast
 
-    # find the metric expression
-    select_expression = parsed_query.find(Select)
-    if select_expression.find(Join):
-        raise ValueError("Unable to convert metrics with JOINs")
+    # Final expression is the exported column of the outermost scope
+    last_scope = scopes[-1]
+    final_exports = list(last_scope.exports.values())
+    if not final_exports:
+        raise ValueError("No projection found in the query")
+        
+    metric_expression = final_exports[0]
 
-    projection = select_expression.args["expressions"]
-    if len(projection) > 1:
-        raise ValueError("Unable to convert metrics with multiple selected expressions")
+    # Strip COALESCE wrappers
+    changed = True
+    while changed:
+        changed = False
+        for node in list(metric_expression.find_all(exp.Coalesce)):
+            if node.this:
+                if node is metric_expression:
+                    metric_expression = node.this.copy()
+                else:
+                    node.replace(node.this)
+                changed = True
+                break
 
-    metric_expression = (
-        projection[0].this if isinstance(projection[0], Alias) else projection[0]
-    )
+    # Flatten nested aggregations (e.g., MAX(SUM(x)) -> SUM(x))
+    aggs = (exp.Sum, exp.Max, exp.Min, exp.Avg, exp.Count)
+    changed = True
+    while changed:
+        changed = False
+        for node in list(metric_expression.find_all(aggs)):
+            inner_aggs = list(node.find_all(aggs))
+            if len(inner_aggs) > 1:
+                if node.this:
+                    if node is metric_expression:
+                        metric_expression = node.this.copy()
+                    else:
+                        node.replace(node.this)
+                    changed = True
+                    break
 
-    # replace aliases with their original expressions
-    for node, _, _ in metric_expression.walk():
-        if isinstance(node, Identifier) and node.sql() in aliases:
-            node.replace(parse_one(aliases[node.sql()]))
-
-    # convert WHERE predicate to a CASE statement
-    where_expression = parsed_query.find(Where)
-    if where_expression:
-
-        # Remove DISTINCT from metric to avoid conficting with CASE
-        distinct = False
-        for node, _, _ in metric_expression.this.walk():
-            if isinstance(node, Distinct):
-                distinct = True
-                node.replace(node.expressions[0])
-
-        for node, _, _ in where_expression.walk():
-            if isinstance(node, Identifier) and node.sql() in aliases:
-                node.replace(parse_one(aliases[node.sql()]))
-
-        case_expression = Case(
-            ifs=[If(this=where_expression.this, true=metric_expression.this)],
-        )
-
-        if distinct:
-            case_expression = Distinct(expressions=[case_expression])
-
-        metric_expression.set("this", case_expression)
-
-    return metric_expression.sql(dialect=DIALECT_MAP.get(dialect))
+    return metric_expression.sql(dialect=dialect_str)
 
 
 def convert_metric_flow_to_superset(

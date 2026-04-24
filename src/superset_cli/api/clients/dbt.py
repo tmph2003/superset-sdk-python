@@ -147,4 +147,4 @@ class MFMetricWithSQLSchema(MFMetricSchema):
 
     sql = fields.String()
     dialect = PostelEnumField(MFSQLEngine)
-    model = fields.String()
+    model = fields.String(allow_none=True, load_default=None)

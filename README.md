@@ -1,5 +1,5 @@
 # Semantic Layer Tool
-This tool is a command line interface (CLI) to interact with your Preset workspaces. Currently it can be used to sync resources (databases, datasets, charts, dashboards) from source control, either in native format or from a `dbt <https://www.getdbt.com/>`_ project. It can also be used to run SQL against any database in any workspace. In the future, the CLI will also allow you to manage your workspaces and users.
+This tool is a command line interface (CLI) to interact with your Apache Superset instances. Currently it can be used to sync resources (databases, datasets, charts, dashboards) from source control, either in native format or from a `dbt <https://www.getdbt.com/>`_ project. It can also be used to run SQL against any database in any instance. In the future, the CLI will also allow you to manage your instances and users.
 
 
 ## Installation
@@ -24,14 +24,14 @@ The following commands are currently available:
 The CLI also allows you to synchronize models, and metrics from a dbt project.
 
 ```bash
-% superset-cli  --username admin --password admin https://superset-dev.sunhouse.com.vn/ sync dbt-core --select models/marts/ --project=test_semantic_layer --profile=sunhouse_etl_pipeline --target=trino --profiles=profiles.yml target/manifest.json
+% superset-cli  --username admin --password admin https://superset-dev.sunhouse.com.vn/ sync dbt-core --select models/gold/ --project=sunhouse_etl_pipeline --profile=sunhouse_etl_pipeline --target=dev --profiles=profiles.yml target/manifest.json
 ```
 
 Running this command will:
 
-1. Read the dbt profile and create the ``$target`` database for the specified project in the Preset workspace.
-2. Every source in the project will be created as a dataset in the Preset workspace.
-3. Every model in the project will be created as a dataset in the Preset workspace.
+1. Read the dbt profile and create the ``$target`` database for the specified project in the Apache Superset instance.
+2. Every source in the project will be created as a dataset in the Apache Superset instance.
+3. Every model in the project will be created as a dataset in the Apache Superset instance.
 4. Any `metrics <https://docs.getdbt.com/docs/building-a-dbt-project/metrics>`_ will be added to the corresponding datasets.
 5. Every dashboard built on top of the dbt sources and/or models will be synchronized back to dbt as an `exposure <https://docs.getdbt.com/docs/building-a-dbt-project/exposures>`_.
 

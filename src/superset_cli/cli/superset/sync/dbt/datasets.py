@@ -75,8 +75,9 @@ def create_dataset(
     kwargs = {
         "database": database["id"],
         "catalog": model["database"],
-        "schema": model["schema"],
+        "schema": model["schema"] or "",
         "table_name": model.get("alias") or model["name"],
+        "sql": model.get("sql")
     }
     try:
         # try to create dataset with catalog
@@ -86,8 +87,11 @@ def create_dataset(
             raise ex
         del kwargs["catalog"]
 
+    # If it's a cross-database model and no SQL is provided, generate a virtual dataset SQL
     url = make_url(database["sqlalchemy_uri"])
-    if not model_in_database(model, url):
+    if kwargs["sql"]:
+        kwargs["sql"] = model.get("sql")
+    elif not kwargs["sql"] and not model_in_database(model, url):
         engine = create_engine_with_check(url)
         quote = engine.dialect.identifier_preparer.quote
         source = ".".join(quote(model[key]) for key in ("database", "schema", "name"))
@@ -153,6 +157,39 @@ def get_or_create_dataset(
         _logger.exception("Unable to create dataset")
         raise CLIError("Unable to create dataset", 1) from excinfo
 
+def get_or_create_virtual_dataset(
+    client: SupersetClient,
+    model: ModelSchema,
+    database: Any,
+) -> Dict[str, Any]:
+    """
+    Returns the existing virtual dataset or creates a new one.
+
+    Virtual datasets are identified by database + table_name.
+    The SQL query is set during creation, not used as a filter.
+    """
+    table_name = model.get("alias") or model["name"]
+    filters = {
+        "database": OneToMany(database["id"]),
+        "table_name": table_name,
+    }
+    existing = client.get_datasets(**filters)
+
+    if len(existing) > 1:
+        raise CLIError("More than one dataset found", 1)
+
+    if existing:
+        dataset = existing[0]
+        _logger.info("Updating virtual dataset %s", model["unique_id"])
+        return client.get_dataset(dataset["id"])
+
+    _logger.info("Creating virtual dataset %s (table=%s)", model["unique_id"], table_name)
+    try:
+        dataset = create_dataset(client, database, model)
+        return client.get_dataset(dataset["id"])
+    except Exception as excinfo:
+        _logger.exception("Unable to create virtual dataset")
+        raise CLIError("Unable to create virtual dataset", 1) from excinfo
 
 def get_certification_info(
     model_kwargs: Dict[str, Any],
@@ -379,7 +416,10 @@ def sync_datasets(  # pylint: disable=too-many-locals, too-many-arguments
     for model in models:
         # get corresponding dataset
         try:
-            dataset = get_or_create_dataset(client, model, database)
+            if model["schema"] is None:
+                dataset = get_or_create_virtual_dataset(client, model, database)
+            else:
+                dataset = get_or_create_dataset(client, model, database)
         except CLIError:
             failed_datasets.append(model["unique_id"])
             continue
@@ -426,6 +466,8 @@ def sync_datasets(  # pylint: disable=too-many-locals, too-many-arguments
             base_url,
             final_dataset_columns,
         )
+
+        _logger.debug("Updating dataset %s with payload: %s", dataset["id"], update)
 
         try:
             client.update_dataset(
