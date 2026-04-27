@@ -292,13 +292,24 @@ def compute_columns_metadata(  # pylint: disable=too-many-branches, too-many-arg
     """
     dbt_metadata = {
         column["name"]: {
-            key: column[key] for key in ("description", "meta") if key in column
+            key: column[key]
+            for key in ("description", "meta", "label")
+            if key in column
         }
         for column in dbt_columns
     }
     for column, definition in dbt_metadata.items():
-        dbt_metadata[column]["verbose_name"] = column
-        for key, value in definition.pop("meta", {}).get("superset", {}).items():
+        superset_overrides = definition.pop("meta", {}).get("superset", {})
+        # verbose_name priority: meta.superset.verbose_name > dbt label
+        # If neither is set, don't set verbose_name (Superset shows column_name by default)
+        dbt_label = definition.pop("label", None)
+        if "verbose_name" in superset_overrides:
+            dbt_metadata[column]["verbose_name"] = superset_overrides.pop(
+                "verbose_name",
+            )
+        elif dbt_label:
+            dbt_metadata[column]["verbose_name"] = dbt_label
+        for key, value in superset_overrides.items():
             dbt_metadata[column][key] = value
         if column_defaults:
             final_column = copy.deepcopy(column_defaults)
@@ -326,11 +337,17 @@ def compute_columns_metadata(  # pylint: disable=too-many-branches, too-many-arg
         if name in dbt_metadata:
             for key, value in dbt_metadata[name].items():
                 if reload_columns or merge_metadata or not column.get(key):
+                    # In merge_metadata mode, don't overwrite existing
+                    # Superset values with empty dbt values
+                    if merge_metadata and not value and column.get(key):
+                        continue
                     column[key] = value
         # calculated column
         elif name in dbt_calc_columns_by_name:
             for key, value in dbt_calc_columns_by_name[name].items():
                 if reload_columns or merge_metadata or not column.get(key):
+                    if merge_metadata and not value and column.get(key):
+                        continue
                     column[key] = value
             del dbt_calc_columns_by_name[name]
         elif column_defaults and (reload_columns or merge_metadata):
@@ -386,6 +403,9 @@ def compute_dataset_metadata(  # pylint: disable=too-many-arguments
         "metrics": final_dataset_metrics,
         **model_kwargs,  # include additional model metadata defined in model.meta.superset
     }
+    # Include SQL for virtual datasets so the query gets updated on re-sync
+    if model.get("sql"):
+        update["sql"] = model["sql"]
     if base_url:
         fragment = "!/model/{unique_id}".format(**model)
         update["external_url"] = str(base_url.with_fragment(fragment))
@@ -405,6 +425,7 @@ def sync_datasets(  # pylint: disable=too-many-locals, too-many-arguments
     certification: Optional[Dict[str, Any]] = None,
     reload_columns: bool = True,
     merge_metadata: bool = False,
+    selective_metrics: bool = False,
 ) -> Tuple[List[Any], List[str]]:
     """
     Read the dbt manifest and import models as datasets with metrics.
@@ -429,28 +450,51 @@ def sync_datasets(  # pylint: disable=too-many-locals, too-many-arguments
         )
 
         # compute metrics
+        dbt_metrics_for_model = metrics.get(model["unique_id"], [])
+        # When using --metrics flag for selective sync, preserve existing
+        # metrics on datasets that don't have any of the selected metrics
+        effective_merge_metrics = merge_metadata or (
+            selective_metrics and not dbt_metrics_for_model
+        )
+        effective_reload_metrics = reload_columns and not (
+            selective_metrics and not dbt_metrics_for_model
+        )
         final_dataset_metrics = compute_metrics(
             dataset["metrics"],
-            metrics.get(model["unique_id"], []),
-            reload_columns,
-            merge_metadata,
+            dbt_metrics_for_model,
+            effective_reload_metrics,
+            effective_merge_metrics,
             metric_defaults=default_configs.get("metrics", {}),
         )
 
         # compute columns
         final_dataset_columns = []
         if not reload_columns:
-            try:
-                refreshed_columns_list = client.get_refreshed_dataset_columns(
-                    dataset["id"],
-                )
-                final_dataset_columns = compute_columns(
-                    dataset["columns"],
-                    refreshed_columns_list,
-                )
-            except SupersetError:
-                failed_datasets.append(model["unique_id"])
-                continue
+            if merge_metadata or model.get("sql") or model["schema"] is None:
+                # merge_metadata: use existing columns, dbt metadata will be
+                # applied later in compute_columns_metadata.
+                # Virtual datasets: no physical table to refresh from.
+                final_dataset_columns = [
+                    clean_metadata(col) for col in dataset["columns"]
+                ]
+            else:
+                try:
+                    refreshed_columns_list = client.get_refreshed_dataset_columns(
+                        dataset["id"],
+                    )
+                    final_dataset_columns = compute_columns(
+                        dataset["columns"],
+                        refreshed_columns_list,
+                    )
+                except SupersetError:
+                    _logger.warning(
+                        "Could not refresh columns for dataset %s, "
+                        "falling back to existing columns",
+                        model["unique_id"],
+                    )
+                    final_dataset_columns = [
+                        clean_metadata(col) for col in dataset["columns"]
+                    ]
 
         # get calculated columns from model
         calculated_columns = (
@@ -466,6 +510,11 @@ def sync_datasets(  # pylint: disable=too-many-locals, too-many-arguments
             base_url,
             final_dataset_columns,
         )
+
+        # In merge_metadata mode, don't overwrite dataset description
+        # with empty string from dbt
+        if merge_metadata and not update.get("description") and dataset.get("description"):
+            del update["description"]
 
         _logger.debug("Updating dataset %s with payload: %s", dataset["id"], update)
 

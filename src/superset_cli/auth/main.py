@@ -46,6 +46,11 @@ class Auth:  # pylint: disable=too-few-public-methods
         if r.status_code != 401:
             return r
 
+        # Prevent infinite retry loop: if the re-sent request also returns 401,
+        # don't attempt to re-auth again.
+        if getattr(r.request, "_reauth_attempted", False):
+            return r
+
         try:
             self.auth()
         except NotImplementedError:
@@ -53,4 +58,5 @@ class Auth:  # pylint: disable=too-few-public-methods
 
         self.session.headers.update(self.get_headers())
         r.request.headers.update(self.get_headers())
+        r.request._reauth_attempted = True  # type: ignore[attr-defined]
         return self.session.send(r.request, verify=False)

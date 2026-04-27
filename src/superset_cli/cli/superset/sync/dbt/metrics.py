@@ -403,6 +403,45 @@ def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
     return metric_expression.sql(dialect=dialect_str)
 
 
+def apply_column_rename_map(
+    expression_sql: str,
+    column_rename_map: Dict[str, str],
+    dialect: MFSQLEngine,
+) -> str:
+    """
+    Replace column references in a metric expression using the rename map.
+
+    This is needed because virtual dataset columns are aliased (e.g. ``table__col``)
+    while the MetricFlow-generated expression uses the original column names.
+    """
+    if not column_rename_map:
+        return expression_sql
+
+    dialect_str = DIALECT_MAP.get(dialect)
+    try:
+        parsed = parse_one(expression_sql, dialect=dialect_str)
+        for col_node in parsed.find_all(exp.Column):
+            original_name = col_node.name
+            if original_name in column_rename_map:
+                col_node.set(
+                    "this",
+                    exp.to_identifier(column_rename_map[original_name]),
+                )
+        return parsed.sql(dialect=dialect_str)
+    except ParseError:
+        _logger.warning(
+            "Could not parse expression for column renaming, falling back to string replacement",
+        )
+        # Fallback: simple string replacement
+        for original, renamed in column_rename_map.items():
+            expression_sql = re.sub(
+                r"\b" + re.escape(original) + r"\b",
+                renamed,
+                expression_sql,
+            )
+        return expression_sql
+
+
 def convert_metric_flow_to_superset(
     sl_metric: MFMetricWithSQLSchema,
 ) -> SupersetMetricDefinition:
@@ -432,11 +471,22 @@ def convert_metric_flow_to_superset(
 
     """
     metric_meta = parse_metric_meta(sl_metric)
-    return {
-        "expression": convert_query_to_projection(
-            sl_metric["sql"],
+    expression = convert_query_to_projection(
+        sl_metric["sql"],
+        sl_metric["dialect"],
+    )
+
+    # Remap column names for virtual datasets (e.g. sale_amount → fact_table__sale_amount)
+    column_rename_map = sl_metric.get("column_rename_map", {})
+    if column_rename_map:
+        expression = apply_column_rename_map(
+            expression,
+            column_rename_map,
             sl_metric["dialect"],
-        ),
+        )
+
+    return {
+        "expression": expression,
         "metric_name": metric_meta["metric_name_override"] or sl_metric["name"],
         "metric_type": sl_metric["type"],
         "verbose_name": sl_metric["label"],

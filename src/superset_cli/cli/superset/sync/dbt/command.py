@@ -2,6 +2,7 @@
 A command to sync dbt models/metrics to Superset and charts/dashboards back as exposures.
 """
 
+import json
 import logging
 import os.path
 import subprocess
@@ -99,6 +100,12 @@ _logger = logging.getLogger(__name__)
     help="Update Superset configurations based on dbt metadata. Superset-only metrics are preserved",
 )
 @click.option(
+    "--metrics",
+    "-m",
+    help="Comma-separated or multiple metric names to sync (e.g. -m revenue -m profit). If not specified, all metrics are synced.",
+    multiple=True,
+)
+@click.option(
     "--raise-failures",
     is_flag=True,
     default=False,
@@ -114,6 +121,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
     target: Optional[str],
     select: Tuple[str, ...],
     exclude: Tuple[str, ...],
+    metrics: Tuple[str, ...] = (),
     profiles: Optional[str] = None,
     exposures: Optional[str] = None,
     import_db: bool = False,
@@ -177,7 +185,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
         )
 
     with open(manifest, encoding="utf-8") as input_:
-        configs = yaml.load(input_, Loader=yaml.SafeLoader)
+        configs = json.load(input_)
 
     profiles_config = load_profiles(Path(profiles), project, profile, target)
     dialect = profiles_config[profile]["outputs"][target]["type"]
@@ -208,9 +216,27 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
             if ModelKey(dataset["schema"], dataset["table_name"]) in model_map
         ]
     else:
+        # Build normalized select paths for filtering metrics
+        select_paths = []
+        if select:
+            for selection in select:
+                for condition in selection.split(","):
+                    select_paths.append(
+                        Path(condition).as_posix().rstrip("/") + "/"
+                    )
+
         og_metrics = [] # original metrics of superset
         sl_metrics = [] # metrics defined in the semantic layer (only for MF dialects)
         for metric_config in configs["metrics"].values():
+            if metrics and metric_config["name"] not in metrics:
+                continue
+            # Filter metrics by --select path
+            if select_paths:
+                metric_path = Path(
+                    metric_config.get("original_file_path", ""),
+                ).as_posix()
+                if not any(metric_path.startswith(sp) for sp in select_paths):
+                    continue
             # dbt is shifting from `metric.meta` to `metric.config.meta`
             metric_config["meta"] = metric_config.get("meta") or metric_config.get("config", {}).get(
                 "meta",
@@ -245,7 +271,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
         seen_virtual_models = {}
         for sl_metric in sl_metrics:
             if sl_metric.get("model") is None:
-                _logger.info(
+                _logger.debug(
                     "Derived metric detected: %s (type=%s)",
                     sl_metric["name"],
                     sl_metric.get("type"),
@@ -259,6 +285,19 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
 
                 # Chỉ tạo model 1 lần cho mỗi ref_dataset
                 if model_name not in seen_virtual_models:
+                    # Build column metadata with verbose_name from column_labels
+                    column_labels = sl_metric.get("column_labels", {})
+                    column_descriptions = sl_metric.get("column_descriptions", {})
+                    columns = [
+                        {
+                            "name": col_name,
+                            "description": column_descriptions.get(col_name, ""),
+                            "meta": {"superset": {
+                                "verbose_name": label,
+                            }},
+                        }
+                        for col_name, label in column_labels.items()
+                    ]
                     model = {
                         "name": model_name,
                         "unique_id": virtual_unique_id,
@@ -266,7 +305,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
                         "database": database_profile,
                         "description": "",
                         "meta": {},
-                        "columns": [],
+                        "columns": columns,
                         "sql": sl_metric["model_sql"],
                     }
                     seen_virtual_models[model_name] = model
@@ -305,6 +344,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
             external_url_prefix,
             reload_columns=reload_columns,
             merge_metadata=merge_metadata,
+            selective_metrics=bool(metrics),
         )
 
     if exposures:
@@ -359,20 +399,39 @@ def get_sl_metric(
             "installed in order to sync metrics",
         )
         return None
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as exc:
         _logger.warning(
-            "Could not generate SQL for metric %s (this happens for some metrics)",
+            "Could not generate SQL for metric %s (this happens for some metrics)\n"
+            "stderr: %s",
             metric["name"],
+            exc.stderr,
         )
         return None
     sql = result.stdout.strip()
 
+    # Debug: show what tables sqlglot finds vs what's in model_map
+    from sqlglot import parse_one as _parse_one
+    from sqlglot.expressions import Table as _Table
+    _dialect_str = {"BIGQUERY": "bigquery", "POSTGRES": "postgres", "SNOWFLAKE": "snowflake", "REDSHIFT": "redshift", "DUCKDB": "duckdb", "DATABRICKS": "databricks", "TRINO": "trino"}.get(dialect.value)
+    _parsed = _parse_one(sql, dialect=_dialect_str)
+    _tables = list(_parsed.find_all(_Table))
+    for _t in _tables:
+        _key = ModelKey(_t.db, _t.name)
+        _logger.debug(
+            "  Table in SQL: db=%s name=%s catalog=%s → ModelKey=%s → in model_map: %s",
+            _t.db, _t.name, getattr(_t, 'catalog', None), _key, _key in model_map,
+        )
+    _logger.debug("  model_map keys (first 10): %s", list(model_map.keys())[:10])
+
     models = get_models_from_sql(sql, dialect, model_map)
     if not models:
+        _logger.warning("get_models_from_sql returned None/empty for metric %s", metric["name"])
         return None
 
     model_sql = None
     model_id = None
+    column_rename_map = {}
+    column_descriptions = {}
 
     if len(models) == 1:
         model_id = models[0]["unique_id"]
@@ -381,7 +440,7 @@ def get_sl_metric(
             f"{m['database']}.{m['schema']}.{m['name']}" for m in models
         ]
         try:
-            model_sql = handle_relation_derived_metric(table_fqns, configs, target_config)
+            model_sql, column_rename_map, column_labels = handle_relation_derived_metric(table_fqns, configs, target_config)
         except Exception as exc:
             _logger.warning(
                 "Cannot generate derived metric SQL for %s: %s",
@@ -389,6 +448,21 @@ def get_sl_metric(
                 exc,
             )
             return None
+
+        # Build column descriptions from original model columns in manifest
+        for m in models:
+            table_name = m["name"]
+            model_cols = m.get("columns", {})
+            # model_cols is a dict: {col_name: {description: ...}}
+            if isinstance(model_cols, dict):
+                for col_name, col_meta in model_cols.items():
+                    desc = col_meta.get("description", "") if isinstance(col_meta, dict) else ""
+                    # Measurement columns: aliased as table__col
+                    aliased = f"{table_name}__{col_name}"
+                    column_descriptions[aliased] = desc
+                    # Join columns: use first model's description
+                    if col_name not in column_descriptions:
+                        column_descriptions[col_name] = desc
 
     return mf_metric_schema.load(
         {
@@ -401,6 +475,9 @@ def get_sl_metric(
             "model": model_id,
             "meta": metric["meta"],
             "model_sql": model_sql,
+            "column_rename_map": column_rename_map if model_sql else {},
+            "column_labels": column_labels if model_sql else {},
+            "column_descriptions": column_descriptions if model_sql else {},
         },
     )
 
@@ -449,7 +526,7 @@ def _fetch_relation_groups(
     dbname = rd_config["dbname"]
     user = rd_config["user"]
 
-    _logger.info(
+    _logger.debug(
         "Connecting to relation DB at %s:%s (db=%s, user=%s)",
         host,
         port,
@@ -491,7 +568,7 @@ def _fetch_relation_groups(
         cur.execute(query, params)
         rows = cur.fetchall()
         
-        _logger.info("Found %s relation group entries for the specified tables.", len(rows))
+        _logger.debug("Found %s relation group entries for the specified tables.", len(rows))
         return rows
     except psycopg2.Error as e:
         _logger.error("Database error while fetching relation groups: %s", e)
@@ -640,8 +717,8 @@ def handle_relation_derived_metric(
     Returns:
         SQL string dạng WITH ... SELECT ... FROM ... FULL OUTER JOIN ...
     """
-    _logger.info("Generating derived metric SQL via CTE + FULL OUTER JOIN")
-    _logger.info("Involved tables: %s", ", ".join(table_names))
+    _logger.debug("Generating derived metric SQL via CTE + FULL OUTER JOIN")
+    _logger.debug("Involved tables: %s", ", ".join(table_names))
 
     if len(table_names) < 2:
         _logger.error("Insufficient tables for JOIN: %s", table_names)
@@ -679,6 +756,26 @@ def handle_relation_derived_metric(
     measurements = _get_measurement_columns(table_names, configs)
     _logger.debug("Resolved measurement columns: %s", measurements)
 
+    # Build dbt label lookup from manifest columns
+    dbt_column_labels: Dict[str, Dict[str, str]] = {}  # table_fqn → {col_name: label}
+    model_lookup: Dict[str, Dict[str, Any]] = {}
+    for node in configs["nodes"].values():
+        if node.get("resource_type") == "model":
+            fqn = f"{node['database']}.{node['schema']}.{node['name']}"
+            model_lookup[fqn] = node
+    for fqn in table_names:
+        model_node = model_lookup.get(fqn)
+        if not model_node:
+            continue
+        cols = model_node.get("columns", {})
+        if isinstance(cols, dict):
+            cols = list(cols.values())
+        dbt_column_labels[fqn] = {
+            col["name"]: col["label"]
+            for col in cols
+            if col.get("label")
+        }
+
     # ── 3. Build CTEs ──────────────────────────────────────────────────
     ordered_tables = [fqn for fqn in table_names if fqn in all_tables_seen]
     aliases = [chr(ord("a") + i) for i in range(len(ordered_tables))]
@@ -694,7 +791,7 @@ def handle_relation_derived_metric(
         )
         cte_names.append(cte_name)
         cte_sqls.append(cte_sql)
-        _logger.info("Built CTE '%s' for table '%s'", cte_name, fqn)
+        _logger.debug("Built CTE '%s' for table '%s'", cte_name, fqn)
 
     # ── 4. Build final SELECT ──────────────────────────────────────────
     # Collect unique join columns (preserving order)
@@ -707,23 +804,59 @@ def handle_relation_derived_metric(
                 seen.add(col)
 
     select_exprs: List[str] = []
+    # Column labels for verbose_name in Superset
+    column_labels: Dict[str, str] = {}
 
     # Join columns → COALESCE
     for col in all_join_cols:
         sources = [
-            f"{alias}.{col}"
-            for fqn, alias in zip(ordered_tables, aliases)
+            f"{alias_map[fqn]}.{col}"
+            for fqn in ordered_tables
             if col in table_join_cols.get(fqn, [])
         ]
         if len(sources) == 1:
             select_exprs.append(f"{sources[0]} AS {col}")
         else:
             select_exprs.append(f"COALESCE({', '.join(sources)}) AS {col}")
+        # Use dbt label if available for join columns
+        for fqn in ordered_tables:
+            if col in (dbt_column_labels.get(fqn) or {}):
+                column_labels[col] = dbt_column_labels[fqn][col]
+                break
+        # If no dbt label found, don't set → shows raw column name
 
-    # Measurement columns
-    for fqn, alias in zip(ordered_tables, aliases):
+    # Measurement columns + build column rename map
+    # Detect duplicate column names across tables
+    all_meas_cols: Dict[str, int] = {}
+    for fqn in ordered_tables:
         for col in measurements.get(fqn, []):
-            select_exprs.append(f"{alias}.{col}")
+            all_meas_cols[col] = all_meas_cols.get(col, 0) + 1
+
+    column_rename_map: Dict[str, str] = {}
+    for fqn, alias in zip(ordered_tables, aliases):
+        _, _, table = _get_fqn_parts(fqn)
+        for col in measurements.get(fqn, []):
+            col_alias = f"{table}__{col}"
+            select_exprs.append(f"COALESCE({alias}.{col}, 0) AS {col_alias}")
+            dbt_label = (dbt_column_labels.get(fqn) or {}).get(col)
+            if dbt_label:
+                if all_meas_cols.get(col, 0) > 1:
+                    # Duplicate column name — add table description to disambiguate
+                    node = model_lookup.get(fqn, {})
+                    table_desc = node.get('description') or node.get('name', '')
+                    column_labels[col_alias] = f"{dbt_label} ({table_desc})"
+                else:
+                    column_labels[col_alias] = dbt_label
+            if col in column_rename_map:
+                _logger.warning(
+                    "Column '%s' exists in multiple tables — "
+                    "metric expressions referencing this column may be ambiguous. "
+                    "Keeping first mapping: %s",
+                    col,
+                    column_rename_map[col],
+                )
+            else:
+                column_rename_map[col] = col_alias
 
     if not select_exprs:
         select_exprs = ["*"]
@@ -763,5 +896,8 @@ def handle_relation_derived_metric(
         f"{chr(10).join(join_parts)}"
     )
     
-    _logger.info("Successfully generated CTE FULL OUTER JOIN query")
-    return final_sql
+    _logger.debug("Measurements dict: %s", measurements)
+    _logger.debug("Column rename map: %s", column_rename_map)
+    _logger.debug("Generated virtual dataset SQL:\n%s", final_sql)
+    _logger.debug("Column labels: %s", column_labels)
+    return final_sql, column_rename_map, column_labels
