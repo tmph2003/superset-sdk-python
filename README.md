@@ -24,7 +24,7 @@ The following commands are currently available:
 The CLI also allows you to synchronize models, and metrics from a dbt project.
 
 ```bash
-% superset-cli  --username admin --password admin https://superset-dev.sunhouse.com.vn/ sync dbt-core --select models/gold/ --project=sunhouse_etl_pipeline --profile=sunhouse_etl_pipeline --target=dev --profiles=profiles.yml target/manifest.json
+% superset-cli  --username admin --password admin https://superset-dev.sunhouse.com.vn/ sync dbt-core --merge-metadata --select models/gold/ --project=sunhouse_etl_pipeline --profile=sunhouse_etl_pipeline --target=dev --profiles=profiles.yml target/manifest.json
 ```
 
 Running this command will:

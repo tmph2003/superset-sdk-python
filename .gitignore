@@ -56,5 +56,3 @@ MANIFEST
 .pyre/
 .pyre_configuration
 .watchmanconfig
-
-test_*.py
