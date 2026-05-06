@@ -1,5 +1,5 @@
 """
-Helper functions.
+Các hàm tiện ích (Helper functions).
 """
 
 import ast
@@ -24,7 +24,7 @@ _logger = logging.getLogger(__name__)
 
 def build_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build the SQLAlchemy URI for a given target.
+    Xây dựng SQLAlchemy URI cho một target nhất định.
     """
     type_ = target.get("type")
 
@@ -46,7 +46,7 @@ def build_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_postgres_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build the SQLAlchemy URI for a Postgres target.
+    Xây dựng SQLAlchemy URI cho một target Postgres.
     """
     if "search_path" in target:
         _logger.warning("Specifying a search path is not supported in Apache Superset")
@@ -76,7 +76,7 @@ def build_postgres_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_redshift_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build the SQLAlchemy URI for a Redshift target.
+    Xây dựng SQLAlchemy URI cho một target Redshift.
     """
     if "search_path" in target:
         _logger.warning("Specifying a search path is not supported in Apache Superset")
@@ -106,9 +106,9 @@ def build_redshift_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_bigquery_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build the SQLAlchemy URI for a BigQuery target.
+    Xây dựng SQLAlchemy URI cho một target BigQuery.
 
-    Currently supports only configuration via ``keyfile``.
+    Hiện tại chỉ hỗ trợ cấu hình thông qua ``keyfile``.
     """
     parameters: Dict[str, Any] = {}
 
@@ -147,7 +147,7 @@ def build_bigquery_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_snowflake_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Build the SQLAlchemy URI for a Snowflake target.
+    Xây dựng SQLAlchemy URI cho một target Snowflake.
     """
     username = target["user"]
     password = target.get("password", "") or None
@@ -203,14 +203,14 @@ def build_snowflake_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
 
 def create_engine_with_check(url: URL) -> Engine:
     """
-    Returns a SQLAlchemy engine or raises an error if missing required dependency.
+    Trả về một SQLAlchemy engine hoặc văng lỗi nếu thiếu gói phụ thuộc (dependency) bắt buộc.
     """
     try:
         return create_engine(url)
     except NoSuchModuleError as exc:
         string_url = str(url)
         dialect = string_url.split("://", maxsplit=1)[0]
-        # TODO: Handle more DB engines that require an additional package
+        # TODO: Xử lý thêm nhiều DB engine yêu cầu cài đặt gói bổ sung
         if dialect == "snowflake":
             raise CLIError(
                 (
@@ -228,9 +228,9 @@ def create_engine_with_check(url: URL) -> Engine:
 
 def env_var(var: str, default: Optional[str] = None) -> str:
     """
-    Simplified version of dbt's ``env_var``.
+    Phiên bản rút gọn của ``env_var`` từ dbt.
 
-    We need this to load the profile with secrets.
+    Chúng ta cần hàm này để load profile cùng với các giá trị bảo mật (secrets).
     """
     if var not in os.environ and not default:
         raise Exception(f"Env var required but not provided: '{var}'")
@@ -239,7 +239,7 @@ def env_var(var: str, default: Optional[str] = None) -> str:
 
 def as_number(value: str) -> Union[int, float]:
     """
-    Simplified version of dbt's ``as_number``.
+    Phiên bản rút gọn của ``as_number`` từ dbt.
     """
     try:
         return int(value)
@@ -249,7 +249,7 @@ def as_number(value: str) -> Union[int, float]:
 
 class Target(TypedDict):
     """
-    Information about the warehouse connection.
+    Thông tin về cấu hình kết nối tới kho dữ liệu (warehouse connection).
     """
 
     profile_name: str
@@ -266,7 +266,7 @@ def load_profiles(
     target_name: Optional[str],
 ) -> Dict[str, Any]:
     """
-    Load the file and apply Jinja2 templating.
+    Tải file và áp dụng (render) các template Jinja2.
     """
     with open(path, encoding="utf-8") as input_:
         profiles = yaml.load(input_, Loader=yaml.SafeLoader)
@@ -296,7 +296,7 @@ def load_profiles(
 
     def apply_templating(config: Any) -> Any:
         """
-        Apply Jinja2 templating to dictionary values recursively.
+        Áp dụng render Jinja2 cho các giá trị trong dict một cách đệ quy.
         """
         if isinstance(config, dict):
             for key, value in config.items():
@@ -315,13 +315,13 @@ def load_profiles(
 # pylint: disable=R0911
 def filter_models(models: List[ModelSchema], condition: str) -> List[ModelSchema]:
     """
-    Filter a list of dbt models given a select condition.
+    Lọc danh sách các model dbt theo một điều kiện lựa chọn (select condition).
 
-    Currently only a subset of the syntax is supported.
+    Hiện tại chỉ hỗ trợ một phần của cú pháp.
 
-    See https://docs.getdbt.com/reference/node-selection/syntax.
+    Xem thêm tại https://docs.getdbt.com/reference/node-selection/syntax.
     """
-    # match by tag
+    # lọc theo tag
     if condition.startswith("tag:"):
         tag = condition.split(":", 1)[1]
         return [model for model in models if tag in model["tags"]]
@@ -334,17 +334,17 @@ def filter_models(models: List[ModelSchema], condition: str) -> List[ModelSchema
                 filtered_models.append(model)
         return filtered_models
 
-    # simple match by name
+    # lọc đơn giản theo tên
     model_names = {model["name"]: model for model in models}
     if condition in model_names:
         return [model_names[condition]]
 
-    # file
+    # tập tin (file)
     file_path = Path(condition)
     if file_path.is_file() and file_path.stem in model_names:
         return [model_names[file_path.stem]]
 
-    # path/directory
+    # đường dẫn/thư mục (path/directory)
     if file_path.is_dir() or (
         str(file_path).endswith("/*") and (file_path := file_path.parent)
     ):
@@ -353,11 +353,11 @@ def filter_models(models: List[ModelSchema], condition: str) -> List[ModelSchema
             model_names[file.stem] for file in sql_files if file.stem in model_names
         ]
 
-    # plus and n-plus operators
+    # toán tử plus và n-plus
     if "+" in condition:
         return filter_plus_operator(models, condition)
 
-    # at operator -- from the docs it seems that it can only be used before the model name
+    # toán tử at (@) -- dựa theo tài liệu, có vẻ toán tử này chỉ có thể được dùng trước tên model
     # (https://docs.getdbt.com/reference/node-selection/graph-operators#the-at-operator)
     if condition.startswith("@"):
         return filter_at_operator(models, condition)
@@ -374,7 +374,7 @@ def filter_plus_operator(
     condition: str,
 ) -> List[ModelSchema]:
     """
-    Filter a list of models using the plus or n-plus operators.
+    Lọc danh sách các model sử dụng toán tử plus (+) hoặc n-plus (n+).
     """
     model_ids = {model["unique_id"]: model for model in models}
     model_names = {model["name"]: model for model in models}
@@ -420,7 +420,7 @@ def filter_plus_operator(
 
 def filter_at_operator(models: List[ModelSchema], condition: str) -> List[ModelSchema]:
     """
-    filter a list of models using the at operator.
+    Lọc danh sách các model sử dụng toán tử at (@).
     """
     model_ids = {model["unique_id"]: model for model in models}
     model_names = {model["name"]: model for model in models}
@@ -435,14 +435,14 @@ def filter_at_operator(models: List[ModelSchema], condition: str) -> List[ModelS
         if id_ not in selected_models:
             selected_models[id_] = model
 
-            # add children
+            # thêm các children
             queue.extend(
                 model_ids[child_id]
                 for child_id in model.get("children", [])
                 if child_id in model_ids
             )
 
-            # add parents of the children of the selected model
+            # thêm các parents (phụ thuộc) của các children thuộc model được chọn
             if model != base_model:
                 queue.extend(
                     model_ids[parent_id]
@@ -459,7 +459,7 @@ def apply_select(
     exclude: Tuple[str, ...],
 ) -> List[ModelSchema]:
     """
-    Apply dbt node selection (https://docs.getdbt.com/reference/node-selection/syntax).
+    Áp dụng lọc dbt node (https://docs.getdbt.com/reference/node-selection/syntax).
     """
     model_ids = {model["unique_id"]: model for model in models}
     selected: Dict[str, ModelSchema]
@@ -491,7 +491,7 @@ def apply_select(
 
 def list_failed_models(failed_models: List[str]) -> str:
     """
-    List models that failed to sync.
+    Liệt kê các model đã đồng bộ thất bại.
     """
     error_message = "Below model(s) failed to sync:"
     for failed_model in failed_models:
@@ -507,7 +507,7 @@ def get_og_metric_from_config(
     sql: Optional[str] = None,
 ) -> OGMetricSchema:
     """
-    Return an og metric from the config, adhering to the dbt Cloud schema.
+    Trả về một og metric từ cấu hình (config), tuân theo dbt Cloud schema.
     """
     metric_schema = OGMetricSchema()
     if depends_on is not None:
@@ -530,7 +530,7 @@ def get_og_metric_from_config(
 
 def parse_metric_meta(metric: MetricSchema) -> Dict[str, Any]:
     """
-    Parses the metric's meta information.
+    Phân tích (parse) thông tin meta của metric.
     """
     kwargs = metric.get("meta", {}).pop("superset", {})
     metric_name_override = kwargs.pop("metric_name", None)
@@ -539,3 +539,33 @@ def parse_metric_meta(metric: MetricSchema) -> Dict[str, Any]:
         "kwargs": kwargs,
         "metric_name_override": metric_name_override,
     }
+
+
+def build_model_fqn_lookup(
+    configs: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Tạo một mapping từ ``catalog.schema.table`` sang manifest model node.
+
+    Mapping này được dùng bởi nhiều module khác nhau (như ``relations``, ``metricflow``) cần
+    tra cứu metadata của model dựa trên tên đầy đủ (fully-qualified table name).
+    """
+    lookup: Dict[str, Dict[str, Any]] = {}
+    for node in configs.get("nodes", {}).values():
+        if node.get("resource_type") == "model":
+            fqn = f"{node['database']}.{node['schema']}.{node['name']}"
+            lookup[fqn] = node
+    return lookup
+
+
+def is_measurement_column(column: Dict[str, Any]) -> bool:
+    """
+    Trả về True nếu một cột được đánh dấu (flagged) là measurement.
+
+    Hàm sẽ kiểm tra cả ``column.meta.is_measurement`` lẫn
+    ``column.config.meta.is_measurement`` (dbt có thể đặt meta ở cả hai nơi này).
+    """
+    return bool(
+        column.get("meta", {}).get("is_measurement")
+        or column.get("config", {}).get("meta", {}).get("is_measurement")
+    )

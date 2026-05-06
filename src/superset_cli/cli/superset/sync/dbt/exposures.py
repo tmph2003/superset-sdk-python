@@ -1,5 +1,5 @@
 """
-Sync Superset dashboards as dbt exposures.
+Đồng bộ các dashboard của Superset thành dbt exposures.
 """
 
 import json
@@ -17,7 +17,7 @@ from superset_cli.api.clients.superset import SupersetClient
 
 class ModelKey(NamedTuple):
     """
-    Model key, so they can be mapped from datasets.
+    Khóa của model, để chúng có thể được map từ các dataset.
     """
 
     schema: Optional[str]
@@ -30,11 +30,11 @@ def get_chart_depends_on(
     model_map: Dict[ModelKey, ModelSchema],
 ) -> List[str]:
     """
-    Get all the dbt dependencies for a given chart.
+    Lấy tất cả các dependency của dbt cho một chart nhất định.
     """
 
-    # imported charts have a null query context until loaded in Explore for the first time.
-    # in that case, we can get the dataset id from the params
+    # các chart được import sẽ có query context là null cho đến khi được tải trong Explore lần đầu tiên.
+    # trong trường hợp đó, chúng ta có thể lấy id của dataset từ phần params
     if chart["query_context"]:
         dataset_id = json.loads(chart["query_context"])["datasource"]["id"]
     elif chart["params"]:
@@ -63,7 +63,7 @@ def get_dashboard_depends_on(
     model_map: Dict[ModelKey, ModelSchema],
 ) -> List[str]:
     """
-    Get all the dbt dependencies for a given dashboard.
+    Lấy tất cả các dependency của dbt cho một dashboard nhất định.
     """
 
     url = client.baseurl / "api/v1/dashboard" / str(dashboard["id"]) / "datasets"
@@ -100,7 +100,7 @@ def sync_exposures(  # pylint: disable=too-many-locals
     model_map: Dict[ModelKey, ModelSchema],
 ) -> None:
     """
-    Write dashboards back to dbt as exposures.
+    Ghi các dashboard ngược lại dbt dưới dạng exposures.
     """
     exposures = []
     charts_ids = set()
@@ -124,7 +124,7 @@ def sync_exposures(  # pylint: disable=too-many-locals
         chart = client.get_chart(chart_id)
         first_owner = chart["owners"][0]
 
-        # remove unsupported characters for dbt exposures name
+        # loại bỏ các ký tự không được hỗ trợ đối với tên của dbt exposures
         asset_title = re.sub(" ", "_", chart["slice_name"])
         asset_title = re.sub(r"\W", "", asset_title)
 

@@ -1,10 +1,10 @@
 """
-MetricFlow CLI interaction and output processing.
+Tương tác với MetricFlow CLI và xử lý đầu ra.
 
-This module handles:
-  - Running the ``mf query --explain`` command.
-  - Sanitising MetricFlow stdout (stripping ANSI codes, version warnings, etc.).
-  - Building the semantic-layer metric schema from MetricFlow output.
+Module này chịu trách nhiệm:
+  - Chạy lệnh ``mf query --explain``.
+  - Làm sạch (sanitise) stdout của MetricFlow (loại bỏ mã ANSI, cảnh báo phiên bản, v.v.).
+  - Xây dựng schema cho semantic-layer metric từ đầu ra của MetricFlow.
 """
 
 import logging
@@ -19,6 +19,7 @@ from superset_cli.api.clients.dbt import (
     ModelSchema,
 )
 from superset_cli.cli.superset.sync.dbt.exposures import ModelKey
+from superset_cli.cli.superset.sync.dbt.lib import is_measurement_column
 from superset_cli.cli.superset.sync.dbt.metrics import get_models_from_sql
 from superset_cli.cli.superset.sync.dbt.relations import handle_relation_derived_metric
 
@@ -29,7 +30,7 @@ _logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# SQL keywords that mark the beginning of a valid SQL statement
+# Các từ khóa SQL đánh dấu sự bắt đầu của một câu lệnh SQL hợp lệ
 _SQL_START_KEYWORDS = frozenset({
     "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER",
     "DROP", "MERGE", "EXPLAIN",
@@ -37,16 +38,6 @@ _SQL_START_KEYWORDS = frozenset({
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-# dbt MetricFlow dialect → sqlglot dialect string
-_DIALECT_MAP = {
-    "BIGQUERY": "bigquery",
-    "POSTGRES": "postgres",
-    "SNOWFLAKE": "snowflake",
-    "REDSHIFT": "redshift",
-    "DUCKDB": "duckdb",
-    "DATABRICKS": "databricks",
-    "TRINO": "trino",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -56,25 +47,25 @@ _DIALECT_MAP = {
 
 def clean_mf_sql_output(raw: str) -> str:
     """
-    Strip non-SQL content from MetricFlow ``mf query --explain`` output.
+    Loại bỏ các nội dung không phải là SQL khỏi đầu ra của lệnh MetricFlow ``mf query --explain``.
 
-    MetricFlow may write version-upgrade warnings, emoji lines, and ANSI
-    colour codes to *stdout* even when ``--quiet`` is used.  This function
-    removes those lines so that only the SQL statement remains.
+    MetricFlow có thể in ra các cảnh báo nâng cấp phiên bản, các dòng chứa emoji và mã
+    màu ANSI ra *stdout* ngay cả khi sử dụng tùy chọn ``--quiet``. Hàm này sẽ
+    loại bỏ những dòng đó để chỉ giữ lại câu lệnh SQL.
 
-    Strategy:
-      1. Remove ANSI escape sequences.
-      2. Walk lines from the top; drop everything until we hit a line whose
-         first token is a known SQL keyword (SELECT, WITH, …).
-      3. Walk lines from the bottom; drop trailing non-SQL lines (warnings,
-         blank lines, emoji notices, etc.).
+    Chiến lược (Strategy):
+      1. Loại bỏ các chuỗi ANSI escape.
+      2. Duyệt các dòng từ trên xuống; bỏ qua mọi thứ cho đến khi gặp một dòng mà
+         token đầu tiên của nó là một từ khóa SQL hợp lệ (SELECT, WITH, …).
+      3. Duyệt các dòng từ dưới lên; loại bỏ các dòng không phải SQL ở cuối (cảnh báo,
+         dòng trống, thông báo có emoji, v.v.).
     """
-    # 1. Strip ANSI
+    # 1. Loại bỏ mã ANSI
     cleaned = _ANSI_ESCAPE_RE.sub("", raw)
 
     lines = cleaned.splitlines()
 
-    # 2. Find first SQL line
+    # 2. Tìm dòng SQL đầu tiên
     start = 0
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -85,22 +76,22 @@ def clean_mf_sql_output(raw: str) -> str:
             start = i
             break
     else:
-        # No SQL keyword found at all
+        # Không tìm thấy từ khóa SQL nào cả
         return ""
 
-    # 3. Trim trailing non-SQL noise
+    # 3. Loại bỏ rác (không phải SQL) ở cuối đoạn text
     end = len(lines)
     for j in range(len(lines) - 1, start - 1, -1):
         stripped = lines[j].strip()
         if not stripped:
             end = j
             continue
-        # Lines starting with emoji / special chars are not SQL
+        # Các dòng bắt đầu bằng emoji / ký tự đặc biệt không phải là SQL
         if stripped[0] in "⚠💡‼🔔🚀✅❌ℹ️":
             end = j
             continue
-        # If the line looks like normal text (no SQL punctuation), skip it
-        # but be conservative — only trim if clearly not SQL
+        # Nếu dòng đó trông giống văn bản bình thường (không có dấu câu của SQL), hãy bỏ qua nó
+        # nhưng phải bảo thủ — chỉ cắt nếu chắc chắn nó không phải SQL
         break
     else:
         return ""
@@ -113,6 +104,51 @@ def clean_mf_sql_output(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _build_single_model_column_metadata(
+    model: ModelSchema,
+) -> tuple:
+    """
+    Xây dựng map để đổi tên cột (rename map), mô tả (descriptions), nhãn (labels),
+    và các cột được select (select columns) cho một single-model metric hướng tới virtual dataset.
+
+    Các measurement column (cột dùng để đo lường) sẽ được đổi alias thành ``<table>__<column>``; 
+    các dimension column (cột chiều dữ liệu) sẽ giữ nguyên tên ban đầu.
+
+    Returns:
+        Tuple gồm (column_rename_map, column_descriptions, column_labels,
+        select_columns).
+    """
+    table_name = model["name"]
+    model_cols = model.get("columns", {})
+    if isinstance(model_cols, dict):
+        model_cols_list = list(model_cols.values())
+    else:
+        model_cols_list = model_cols
+
+    column_rename_map: Dict[str, str] = {}
+    column_descriptions: Dict[str, str] = {}
+    column_labels: Dict[str, str] = {}
+    select_columns = [col["name"] for col in model_cols_list]
+
+    for col in model_cols_list:
+        col_name = col["name"]
+        if is_measurement_column(col):
+            aliased = f"{table_name}__{col_name}"
+            column_rename_map[col_name] = aliased
+            column_descriptions[aliased] = col.get("description", "")
+            if col.get("label"):
+                column_labels[aliased] = col["label"]
+            # Thay thế tên gốc bằng alias trong select_columns
+            select_columns = [
+                aliased if c == col_name else c for c in select_columns
+            ]
+        else:
+            column_descriptions[col_name] = col.get("description", "")
+            if col.get("label"):
+                column_labels[col_name] = col["label"]
+
+    return column_rename_map, column_descriptions, column_labels, select_columns
+
 def get_sl_metric(
     metric: Dict[str, Any],
     model_map: Dict[ModelKey, ModelSchema],
@@ -121,11 +157,11 @@ def get_sl_metric(
     target_config: Dict[str, Any] = None,
 ) -> Optional[MFMetricWithSQLSchema]:
     """
-    Compute a SL metric using the ``mf`` CLI.
+    Tính toán một SL (Semantic Layer) metric sử dụng ``mf`` CLI.
 
-    Runs ``mf query --explain --metrics <name> --quiet``, cleans the output,
-    resolves the referenced models, and returns a fully-loaded
-    :class:`MFMetricWithSQLSchema`.
+    Chạy lệnh ``mf query --explain --metrics <name> --quiet``, làm sạch đầu ra,
+    phân giải các model được tham chiếu và trả về một
+    :class:`MFMetricWithSQLSchema` chứa đầy đủ dữ liệu.
     """
     mf_metric_schema = MFMetricWithSQLSchema()
 
@@ -134,7 +170,7 @@ def get_sl_metric(
         _logger.info(
             "Parsing metric %s %s\nFROM: %s",
             metric["name"],
-            "(derived)" if metric.get("type", "").lower() == "derived" else "",
+            f"({metric.get('type', '').lower()})" if metric.get("type", "").lower() in ("derived", "ratio") else "",
             metric["path"],
         )
         result = subprocess.run(command, capture_output=True, text=True, check=True, encoding="utf-8", env=os.environ, errors="ignore")
@@ -154,8 +190,8 @@ def get_sl_metric(
         return None
     raw_output = result.stdout.strip()
 
-    # MetricFlow may emit non-SQL lines to stdout (version warnings, emoji
-    # notices, etc.) even with --quiet.  Strip them so sqlglot can parse.
+    # MetricFlow có thể in ra các dòng không phải SQL ra stdout (cảnh báo phiên bản, thông báo
+    # emoji, v.v.) ngay cả với tùy chọn --quiet. Loại bỏ chúng để sqlglot có thể parse (phân tích) được.
     sql = clean_mf_sql_output(raw_output)
 
     if not sql:
@@ -169,55 +205,68 @@ def get_sl_metric(
     _logger.debug("mf raw output:\n%s", raw_output)
     _logger.debug("Cleaned SQL:\n%s", sql)
 
-    # Debug: show what tables sqlglot finds vs what's in model_map
-    from sqlglot import parse_one as _parse_one
-    from sqlglot.expressions import Table as _Table
-    _dialect_str = _DIALECT_MAP.get(dialect.value)
-    _parsed = _parse_one(sql, dialect=_dialect_str)
-    _tables = list(_parsed.find_all(_Table))
-    for _t in _tables:
-        _key = ModelKey(_t.db, _t.name)
-        _logger.debug(
-            "  Table in SQL: db=%s name=%s catalog=%s → ModelKey=%s → in model_map: %s",
-            _t.db, _t.name, getattr(_t, 'catalog', None), _key, _key in model_map,
-        )
-    _logger.debug("  model_map keys (first 10): %s", list(model_map.keys())[:10])
 
     models = get_models_from_sql(sql, dialect, model_map)
     if not models:
         _logger.warning("get_models_from_sql returned None/empty for metric %s", metric["name"])
         return None
 
+    # Khử trùng lặp (deduplicate) các model bằng unique_id.
+    # Đối với derived metric mà các sub-metric cùng nằm trên *một* bảng, SQL được sinh ra 
+    # từ MetricFlow sẽ tham chiếu bảng đó nhiều lần (mỗi sub-metric CTE một lần).
+    # Nếu không khử trùng lặp, code sẽ chạy nhầm vào nhánh multi-table (FULL OUTER JOIN).
+    seen_ids = set()
+    unique_models = []
+    for m in models:
+        if m["unique_id"] not in seen_ids:
+            seen_ids.add(m["unique_id"])
+            unique_models.append(m)
+    models = unique_models
+
+    _logger.debug(
+        "Metric %s: %d unique models after dedup: %s",
+        metric["name"],
+        len(models),
+        [m["unique_id"] for m in models],
+    )
+
     model_sql = None
     model_id = None
     column_rename_map = {}
     column_descriptions = {}
     column_labels = {}
+    select_columns = []
 
     if len(models) == 1:
         model_id = models[0]["unique_id"]
         if metric.get("meta", {}).get("ref_dataset"):
             table_name = models[0]["name"]
+            column_rename_map, column_descriptions, column_labels, select_columns = (
+                _build_single_model_column_metadata(models[0])
+            )
+            # Tạo một câu SELECT ánh xạ các cột đo lường gốc sang tên bí danh (alias) của chúng
+            db_name = models[0].get("database", "")
+            schema_name = models[0].get("schema", "")
+            
             model_cols = models[0].get("columns", {})
-            if isinstance(model_cols, dict):
-                model_cols_list = list(model_cols.values())
-            else:
-                model_cols_list = model_cols
+            model_cols_list = list(model_cols.values()) if isinstance(model_cols, dict) else model_cols
+            
+            select_items = []
             for col in model_cols_list:
-                col_name = col["name"]
-                is_measurement = col.get("meta", {}).get("is_measurement") or col.get("config", {}).get("meta", {}).get("is_measurement")
-                if is_measurement:
-                    aliased = f"{table_name}__{col_name}"
-                    column_rename_map[col_name] = aliased
-                    column_descriptions[aliased] = col.get("description", "")
-                    if col.get("label"):
-                        column_labels[aliased] = col.get("label")
+                orig = col["name"]
+                if orig in column_rename_map:
+                    select_items.append(f"{orig} AS {column_rename_map[orig]}")
+                else:
+                    select_items.append(orig)
+            
+            select_clause = ",\n    ".join(select_items)
+            model_sql = f"SELECT\n    {select_clause}\nFROM {db_name}.{schema_name}.{table_name}"
     else:
         table_fqns = [
             f"{m['database']}.{m['schema']}.{m['name']}" for m in models
         ]
         try:
-            model_sql, column_rename_map, column_labels = handle_relation_derived_metric(table_fqns, configs, target_config)
+            model_sql, column_rename_map, column_labels, select_columns = handle_relation_derived_metric(table_fqns, configs, target_config)
         except Exception as exc:
             _logger.warning(
                 "Cannot generate derived metric SQL for %s: %s",
@@ -226,18 +275,25 @@ def get_sl_metric(
             )
             return None
 
-        # Build column descriptions from original model columns in manifest
+        _logger.debug(
+            "Metric %s: multi-model SQL generated (has FULL OUTER JOIN: %s):\n%s",
+            metric["name"],
+            "FULL OUTER JOIN" in (model_sql or ""),
+            model_sql,
+        )
+
+        # Xây dựng mô tả cho các cột từ các model column nguyên bản trong manifest
         for m in models:
             table_name = m["name"]
             model_cols = m.get("columns", {})
-            # model_cols is a dict: {col_name: {description: ...}}
+            # model_cols là một dict dạng: {col_name: {description: ...}}
             if isinstance(model_cols, dict):
                 for col_name, col_meta in model_cols.items():
                     desc = col_meta.get("description", "") if isinstance(col_meta, dict) else ""
-                    # Measurement columns: aliased as table__col
+                    # Measurement columns: sẽ được tạo alias là table__col
                     aliased = f"{table_name}__{col_name}"
                     column_descriptions[aliased] = desc
-                    # Join columns: use first model's description
+                    # Join columns: sử dụng mô tả của model đầu tiên
                     if col_name not in column_descriptions:
                         column_descriptions[col_name] = desc
 
@@ -255,5 +311,6 @@ def get_sl_metric(
             "column_rename_map": column_rename_map,
             "column_labels": column_labels if model_sql or column_rename_map else {},
             "column_descriptions": column_descriptions,
+            "select_columns": select_columns,
         },
     )

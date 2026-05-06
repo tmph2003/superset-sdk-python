@@ -1,15 +1,21 @@
 """
-Relation-based SQL generation for derived virtual datasets.
+Sinh câu lệnh SQL dựa trên các mối quan hệ (relation-based) dành cho derived virtual datasets.
 
-This module handles:
-  - Querying the ``relation_members`` database for join metadata.
-  - Extracting measurement columns from the dbt manifest.
-  - Building CTE + FULL OUTER JOIN SQL for multi-table derived metrics.
+Module này chịu trách nhiệm:
+  - Truy vấn database ``relation_members`` để lấy join metadata.
+  - Trích xuất các measurement column từ dbt manifest.
+  - Xây dựng SQL dạng CTE + FULL OUTER JOIN cho các multi-table derived metric.
 """
 
+import contextlib
 import logging
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
+
+from superset_cli.cli.superset.sync.dbt.lib import (
+    build_model_fqn_lookup,
+    is_measurement_column,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -20,7 +26,7 @@ _logger = logging.getLogger(__name__)
 
 
 def _get_fqn_parts(fqn: str) -> Tuple[str, str, str]:
-    """Split ``catalog.schema.table`` into a tuple ``(catalog, schema, table)``."""
+    """Tách ``catalog.schema.table`` thành một tuple ``(catalog, schema, table)``."""
     parts = fqn.split(".")
     return parts[0], parts[1], parts[2]
 
@@ -32,8 +38,8 @@ def _fetch_relation_groups(
     """
     Query relation_members DB để lấy các nhóm quan hệ chứa đủ các bảng.
 
-    Connection info is read from the dbt profile target's
-    ``meta.relation_designer`` section::
+    Thông tin kết nối được đọc từ mục ``meta.relation_designer`` 
+    thuộc cấu hình profile target của dbt::
 
         meta:
           relation_designer:
@@ -79,40 +85,36 @@ def _fetch_relation_groups(
         user=user,
         password=rd_config.get("password", ""),
     )
-    try:
-        cur = conn.cursor()
-        placeholders = ", ".join(["%s"] * len(table_names))
-        query = f"""
-            SELECT
-                rm.group_id,
-                rm.catalog || '.' || rm.schema || '.' || rm.table_name AS fqn,
-                rm.column_name
-            FROM public.relation_members rm
-            WHERE rm.group_id IN (
-                SELECT rm2.group_id
-                FROM public.relation_members rm2
-                WHERE rm2.catalog || '.' || rm2.schema || '.' || rm2.table_name
-                      IN ({placeholders})
-                GROUP BY rm2.group_id
-                HAVING COUNT(DISTINCT rm2.catalog || '.' || rm2.schema || '.' || rm2.table_name)
-                       = %s
-            )
-            AND rm.catalog || '.' || rm.schema || '.' || rm.table_name
-                IN ({placeholders})
-        """
-        params = list(table_names) + [len(table_names)] + list(table_names)
-        
-        _logger.debug("Executing relation_members query for %s tables.", len(table_names))
-        cur.execute(query, params)
-        rows = cur.fetchall()
-        
-        _logger.debug("Found %s relation group entries for the specified tables.", len(rows))
-        return rows
-    except psycopg2.Error as e:
-        _logger.error("Database error while fetching relation groups: %s", e)
-        raise
-    finally:
-        conn.close()
+    with contextlib.closing(conn):
+        try:
+            cur = conn.cursor()
+            placeholders = ", ".join(["%s"] * len(table_names))
+            query = f"""
+                SELECT
+                    rm.group_id,
+                    rm.catalog || '.' || rm.schema || '.' || rm.table_name AS fqn,
+                    rm.column_name
+                FROM public.relation_members rm
+                WHERE rm.group_id IN (
+                    SELECT rm2.group_id
+                    FROM public.relation_members rm2
+                    WHERE rm2.catalog || '.' || rm2.schema || '.' || rm2.table_name IN ({placeholders})
+                    GROUP BY rm2.group_id
+                    HAVING COUNT(DISTINCT rm2.catalog || '.' || rm2.schema || '.' || rm2.table_name) = %s
+                )
+                AND rm.catalog || '.' || rm.schema || '.' || rm.table_name IN ({placeholders})
+            """
+            params = list(table_names) + [len(table_names)] + list(table_names)
+            
+            _logger.debug("Executing relation_members query for %s tables.", len(table_names))
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            _logger.debug("Found %s relation group entries for the specified tables.", len(rows))
+            return rows
+        except psycopg2.Error as e:
+            _logger.error("Database error while fetching relation groups: %s", e)
+            raise
 
 
 def _get_measurement_columns(
@@ -128,11 +130,7 @@ def _get_measurement_columns(
     Returns:
         Dict mapping table FQN → list of measurement column names.
     """
-    model_lookup: Dict[str, Dict[str, Any]] = {}
-    for node in configs["nodes"].values():
-        if node.get("resource_type") == "model":
-            fqn = f"{node['database']}.{node['schema']}.{node['name']}"
-            model_lookup[fqn] = node
+    model_lookup = build_model_fqn_lookup(configs)
 
     result: Dict[str, List[str]] = {}
     for table_fqn in table_names:
@@ -148,8 +146,7 @@ def _get_measurement_columns(
         meas_cols = [
             col["name"]
             for col in columns
-            if col.get("meta", {}).get("is_measurement")
-            or col.get("config", {}).get("meta", {}).get("is_measurement")
+            if is_measurement_column(col)
         ]
         if meas_cols:
             result[table_fqn] = meas_cols
@@ -230,7 +227,7 @@ def _build_join_conditions(
         elif len(equalities) > 1:
             conditions.append(f"({' OR '.join(equalities)})")
 
-    return conditions
+    return list(dict.fromkeys(conditions))
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +239,7 @@ def handle_relation_derived_metric(
     table_names: List[str],
     configs: Dict[str, Any],
     target_config: Dict[str, Any] = None,
-) -> Tuple[str, Dict[str, str], Dict[str, str]]:
+) -> Tuple[str, Dict[str, str], Dict[str, str], List[str]]:
     """
     Sinh câu query CTE + FULL OUTER JOIN cho derived metric.
 
@@ -258,7 +255,7 @@ def handle_relation_derived_metric(
         target_config: Cấu hình connection của database từ profile.
 
     Returns:
-        Tuple of (sql, column_rename_map, column_labels).
+        Tuple of (sql, column_rename_map, column_labels, all_select_columns).
     """
     _logger.debug("Generating derived metric SQL via CTE + FULL OUTER JOIN")
     _logger.debug("Involved tables: %s", ", ".join(table_names))
@@ -285,7 +282,7 @@ def handle_relation_derived_metric(
         groups[group_id][fqn].append(column_name)
         all_tables_seen.add(fqn)
 
-    # Join columns per table (union across groups, sorted for stability)
+    # Các cột join cho mỗi bảng (nối/gộp từ các nhóm lại, và sắp xếp để giữ sự ổn định - stability)
     table_join_cols: Dict[str, List[str]] = {}
     join_cols_sets: Dict[str, set] = defaultdict(set)
     for group_tables in groups.values():
@@ -299,13 +296,9 @@ def handle_relation_derived_metric(
     measurements = _get_measurement_columns(table_names, configs)
     _logger.debug("Resolved measurement columns: %s", measurements)
 
-    # Build dbt label lookup from manifest columns
+    # Xây dựng từ điển tra cứu dbt label từ các cột trong manifest
     dbt_column_labels: Dict[str, Dict[str, str]] = {}  # table_fqn → {col_name: label}
-    model_lookup: Dict[str, Dict[str, Any]] = {}
-    for node in configs["nodes"].values():
-        if node.get("resource_type") == "model":
-            fqn = f"{node['database']}.{node['schema']}.{node['name']}"
-            model_lookup[fqn] = node
+    model_lookup = build_model_fqn_lookup(configs)
     for fqn in table_names:
         model_node = model_lookup.get(fqn)
         if not model_node:
@@ -337,7 +330,7 @@ def handle_relation_derived_metric(
         _logger.debug("Built CTE '%s' for table '%s'", cte_name, fqn)
 
     # ── 4. Build final SELECT ──────────────────────────────────────────
-    # Collect unique join columns (preserving order)
+    # Thu thập các join column riêng biệt (giữ nguyên thứ tự ban đầu)
     all_join_cols: List[str] = []
     seen: set = set()
     for fqn in ordered_tables:
@@ -347,10 +340,10 @@ def handle_relation_derived_metric(
                 seen.add(col)
 
     select_exprs: List[str] = []
-    # Column labels for verbose_name in Superset
+    # Các nhãn của cột (column labels) dành cho thuộc tính verbose_name trên Superset
     column_labels: Dict[str, str] = {}
 
-    # Join columns → COALESCE
+    # Xử lý các cột join → dùng COALESCE
     for col in all_join_cols:
         sources = [
             f"{alias_map[fqn]}.{col}"
@@ -361,15 +354,15 @@ def handle_relation_derived_metric(
             select_exprs.append(f"{sources[0]} AS {col}")
         else:
             select_exprs.append(f"COALESCE({', '.join(sources)}) AS {col}")
-        # Use dbt label if available for join columns
+        # Sử dụng dbt label nếu có sẵn đối với các join column
         for fqn in ordered_tables:
             if col in (dbt_column_labels.get(fqn) or {}):
                 column_labels[col] = dbt_column_labels[fqn][col]
                 break
-        # If no dbt label found, don't set → shows raw column name
+        # Nếu không tìm thấy dbt label, không thiết lập gì cả → sẽ hiển thị tên cột gốc
 
-    # Measurement columns + build column rename map
-    # Detect duplicate column names across tables
+    # Xử lý các cột measurement + xây dựng map đổi tên cột (column rename map)
+    # Phát hiện các cột bị trùng tên giữa các bảng
     all_meas_cols: Dict[str, int] = {}
     for fqn in ordered_tables:
         for col in measurements.get(fqn, []):
@@ -384,7 +377,7 @@ def handle_relation_derived_metric(
             dbt_label = (dbt_column_labels.get(fqn) or {}).get(col)
             if dbt_label:
                 if all_meas_cols.get(col, 0) > 1:
-                    # Duplicate column name — add table description to disambiguate
+                    # Trùng tên cột — thêm đoạn mô tả của bảng để làm rõ (disambiguate)
                     node = model_lookup.get(fqn, {})
                     table_desc = node.get('description') or node.get('name', '')
                     column_labels[col_alias] = f"{dbt_label} ({table_desc})"
@@ -403,6 +396,15 @@ def handle_relation_derived_metric(
 
     if not select_exprs:
         select_exprs = ["*"]
+
+    # Thu thập TẤT CẢ các tên cột nằm trong câu lệnh SELECT (bao gồm join cols + measurement cols)
+    all_select_columns = list(all_join_cols)
+    for fqn in ordered_tables:
+        _, _, table = _get_fqn_parts(fqn)
+        for col in measurements.get(fqn, []):
+            col_alias = f"{table}__{col}"
+            if col_alias not in all_select_columns:
+                all_select_columns.append(col_alias)
 
     # ── 5. Build FULL OUTER JOIN ───────────────────────────────────────
     join_parts = [f"FROM {cte_names[0]} {aliases[0]}"]
@@ -443,4 +445,5 @@ def handle_relation_derived_metric(
     _logger.debug("Column rename map: %s", column_rename_map)
     _logger.debug("Generated virtual dataset SQL:\n%s", final_sql)
     _logger.debug("Column labels: %s", column_labels)
-    return final_sql, column_rename_map, column_labels
+    _logger.debug("All select columns: %s", all_select_columns)
+    return final_sql, column_rename_map, column_labels, all_select_columns

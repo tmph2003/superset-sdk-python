@@ -1,7 +1,7 @@
 """
-Metric conversion.
+Chuyển đổi metric.
 
-This module is used to convert dbt metrics into Superset metrics.
+Module này được dùng để chuyển đổi các dbt metric thành Superset metric.
 """
 
 # pylint: disable=consider-using-f-string
@@ -16,14 +16,7 @@ import sqlglot
 from sqlglot import Expression, ParseError, exp, parse_one
 from sqlglot.expressions import (
     Alias,
-    Case,
-    Distinct,
-    Identifier,
-    If,
-    Join,
-    Select,
     Table,
-    Where,
 )
 from sqlglot.optimizer import traverse_scope
 
@@ -55,7 +48,7 @@ DIALECT_MAP = {
 # pylint: disable=too-many-locals
 def get_metric_expression(metric_name: str, metrics: Dict[str, OGMetricSchema]) -> str:
     """
-    Return a SQL expression for a given dbt metric using sqlglot.
+    Trả về câu lệnh SQL (SQL expression) cho một dbt metric nhất định bằng cách sử dụng sqlglot.
     """
     if metric_name not in metrics:
         raise Exception(f"Invalid metric {metric_name}")
@@ -118,7 +111,7 @@ def get_metric_expression(metric_name: str, metrics: Dict[str, OGMetricSchema]) 
 
 def apply_filters(sql: str, filters: List[FilterSchema]) -> str:
     """
-    Apply filters to SQL expression.
+    Áp dụng filter (bộ lọc) vào câu lệnh SQL.
     """
     condition = " AND ".join(
         "{field} {operator} {value}".format(**filter_) for filter_ in filters
@@ -131,7 +124,7 @@ def get_metrics_for_model(
     metrics: List[OGMetricSchema],
 ) -> List[OGMetricSchema]:
     """
-    Given a list of metrics, return those that are based on a given model.
+    Với một danh sách các metric được truyền vào, trả về những metric được xây dựng trên một model nhất định.
     """
     metric_map = {metric["unique_id"]: metric for metric in metrics}
     related_metrics = []
@@ -163,7 +156,7 @@ def get_metrics_for_model(
 
 def get_metric_models(unique_id: str, metrics: List[OGMetricSchema]) -> Set[str]:
     """
-    Given a metric, return the models it depends on.
+    Với một metric được truyền vào, trả về danh sách các model mà nó phụ thuộc (depends on).
     """
     metric_map = {metric["unique_id"]: metric for metric in metrics}
     metric = metric_map[unique_id]
@@ -184,7 +177,7 @@ def get_metric_definition(
     metrics: List[OGMetricSchema],
 ) -> SupersetMetricDefinition:
     """
-    Build a Superset metric definition from an OG (< 1.6) dbt metric.
+    Xây dựng một định nghĩa Superset metric từ một OG (< 1.6) dbt metric.
     """
     metric_map = {metric["name"]: metric for metric in metrics}
     metric = metric_map[metric_name]
@@ -207,15 +200,15 @@ def get_superset_metrics_per_model(
     sl_metrics: Optional[List[MFMetricWithSQLSchema]] = None,
 ) -> Dict[str, List[SupersetMetricDefinition]]:
     """
-    Build a dictionary of Superset metrics for each dbt model.
+    Xây dựng một từ điển chứa các Superset metric cho từng dbt model.
     """
     superset_metrics = defaultdict(list)
     for metric in og_metrics:
-        # dbt supports creating derived metrics with raw syntax. In case the metric doesn't
-        # rely on other metrics (or rely on other metrics that aren't associated with any
-        # model), it's required to specify the dataset the metric should be associated with
-        # under the ``meta.superset.model`` key. If the derived metric is just an expression
-        # with no dependency, it's not required to parse the metric SQL.
+        # dbt hỗ trợ tạo derived metric bằng cú pháp thô. Trong trường hợp metric không
+        # phụ thuộc vào các metric khác (hoặc phụ thuộc vào các metric không được gắn với 
+        # bất kỳ model nào), bắt buộc phải chỉ định dataset mà metric cần được gắn vào
+        # dưới key ``meta.superset.model``. Nếu derived metric chỉ là một biểu thức
+        # không có dependencies, không cần thiết phải phân tích (parse) SQL của metric đó.
         if model := metric.get("meta", {}).get("superset", {}).pop("model", None):
             if len(metric["depends_on"]) == 0:
                 metric["skip_parsing"] = True
@@ -254,8 +247,9 @@ def get_superset_metrics_per_model(
 
 def wrap_with_where(ast: exp.Expression, where_condition: exp.Expression) -> exp.Expression:
     """
-    Wrap the top-level aggregations in `ast` with a CASE WHEN `where_condition` THEN ... END.
-    If there are no aggregations, wrap the entire expression.
+    Bao bọc (wrap) các phép tổng hợp (aggregation) ngoài cùng (top-level) trong `ast` 
+    bằng cú pháp CASE WHEN `where_condition` THEN ... END.
+    Nếu không có phép tổng hợp nào, bọc lại toàn bộ biểu thức.
     """
     aggs = (exp.Sum, exp.Max, exp.Min, exp.Avg, exp.Count)
 
@@ -290,13 +284,51 @@ def wrap_with_where(ast: exp.Expression, where_condition: exp.Expression) -> exp
     return exp.Case(ifs=[exp.If(this=where_condition.copy(), true=ast)])
 
 
+def _resolve_column_nodes(
+    ast_node: exp.Expression,
+    available_columns: dict,
+) -> None:
+    """
+    Phân giải các tham chiếu cột trong *ast_node* sử dụng *available_columns*.
+
+    Thay thế mỗi ``exp.Column`` bằng AST cụ thể từ một source scope
+    khi tìm thấy kết nối bởi ``(table, col)`` hoặc ``(None, col)``.
+    Có cơ chế dự phòng (fallback) để khớp mờ (fuzzy match) tiền tố/hậu tố cho các alias của MetricFlow
+    (ví dụ: ``col_sum`` với ``col``).
+    """
+    for column_node in list(ast_node.find_all(exp.Column)):
+        col_name = column_node.name
+        table_name = column_node.table or None
+        key = (table_name, col_name)
+        if key in available_columns:
+            column_node.replace(available_columns[key].copy())
+        elif (None, col_name) in available_columns:
+            column_node.replace(available_columns[(None, col_name)].copy())
+        else:
+            # Cơ chế dự phòng (Fallback): Đôi khi MetricFlow gắn thêm loại metric 
+            # (ví dụ: _sum) vào alias ở vòng ngoài
+            for avail_table, avail_col in available_columns:
+                if (
+                    avail_col
+                    and col_name != avail_col
+                    and (
+                        col_name.startswith(avail_col + "_")
+                        or avail_col.startswith(col_name + "_")
+                    )
+                ):
+                    column_node.replace(
+                        available_columns[(avail_table, avail_col)].copy(),
+                    )
+                    break
+
+
 def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
     """
-    Convert a MetricFlow compiled SQL to a projection.
+    Chuyển đổi một đoạn SQL được biên dịch bởi MetricFlow thành một phép chiếu (projection).
 
-    Handles both single-table and multi-table (JOIN in subqueries) queries.
-    Evaluates scopes bottom-up to resolve aliases and push WHERE clauses into 
-    CASE statements.
+    Xử lý cả câu truy vấn đơn bảng lẫn đa bảng (dùng JOIN trong các truy vấn con - subquery).
+    Đánh giá các scope từ dưới lên (bottom-up) để phân giải các alias và đẩy các mệnh đề WHERE
+    vào bên trong cấu trúc CASE.
     """
     dialect_str = DIALECT_MAP.get(dialect)
     parsed_query = parse_one(sql, dialect=dialect_str)
@@ -306,7 +338,7 @@ def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
     for scope in scopes:
         scope.exports = {}
         
-        # 1. Build available columns from source scopes
+        # 1. Xây dựng các cột khả dụng (available columns) từ các source scope
         available_columns = {}
         for alias, source in scope.sources.items():
             if hasattr(source, "exports"):
@@ -314,27 +346,14 @@ def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
                     available_columns[(alias, col)] = ast
                     available_columns[(None, col)] = ast
                     
-        # 3. Handle WHERE condition
+        # 2. Xử lý điều kiện WHERE
         where_expr = scope.expression.args.get("where")
         where_condition = None
         if where_expr:
             where_condition = where_expr.this.copy()
-            for column_node in list(where_condition.find_all(exp.Column)):
-                col_name = column_node.name
-                table_name = column_node.table if column_node.table else None
-                key = (table_name, col_name)
-                if key in available_columns:
-                    column_node.replace(available_columns[key].copy())
-                elif (None, col_name) in available_columns:
-                    column_node.replace(available_columns[(None, col_name)].copy())
-                else:
-                    # Fallback: MetricFlow sometimes appends metric types (e.g., _sum) to outer aliases
-                    for avail_table, avail_col in available_columns.keys():
-                        if avail_col and col_name != avail_col and (col_name.startswith(avail_col + "_") or avail_col.startswith(col_name + "_")):
-                            column_node.replace(available_columns[(avail_table, avail_col)].copy())
-                            break
+            _resolve_column_nodes(where_condition, available_columns)
             
-        # 4. Process SELECT expressions and apply substitutions / WHERE wrapping
+        # 3. Xử lý các biểu thức SELECT và áp dụng các phép thay thế / bao bọc WHERE
         if isinstance(scope.expression, exp.Select):
             for proj in scope.expression.expressions:
                 if isinstance(proj, exp.Alias):
@@ -344,26 +363,14 @@ def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
                     exported_name = proj.name
                     val_ast = proj.copy()
                     
-                for column_node in list(val_ast.find_all(exp.Column)):
-                    col_name = column_node.name
-                    table_name = column_node.table if column_node.table else None
-                    key = (table_name, col_name)
-                    if key in available_columns:
-                        column_node.replace(available_columns[key].copy())
-                    elif (None, col_name) in available_columns:
-                        column_node.replace(available_columns[(None, col_name)].copy())
-                    else:
-                        for avail_table, avail_col in available_columns.keys():
-                            if avail_col and col_name != avail_col and (col_name.startswith(avail_col + "_") or avail_col.startswith(col_name + "_")):
-                                column_node.replace(available_columns[(avail_table, avail_col)].copy())
-                                break
+                _resolve_column_nodes(val_ast, available_columns)
                 
                 if where_condition:
                     val_ast = wrap_with_where(val_ast, where_condition)
                     
                 scope.exports[exported_name] = val_ast
 
-    # Final expression is the exported column of the outermost scope
+    # Biểu thức cuối cùng chính là cột được export từ outermost scope
     last_scope = scopes[-1]
     final_exports = list(last_scope.exports.values())
     if not final_exports:
@@ -371,7 +378,7 @@ def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
         
     metric_expression = final_exports[0]
 
-    # Strip COALESCE wrappers
+    # Bỏ đi các lớp bao bọc COALESCE
     changed = True
     while changed:
         changed = False
@@ -384,7 +391,7 @@ def convert_query_to_projection(sql: str, dialect: MFSQLEngine) -> str:
                 changed = True
                 break
 
-    # Flatten nested aggregations (e.g., MAX(SUM(x)) -> SUM(x))
+    # Làm phẳng các aggregation lồng nhau (ví dụ: MAX(SUM(x)) -> SUM(x))
     aggs = (exp.Sum, exp.Max, exp.Min, exp.Avg, exp.Count)
     changed = True
     while changed:
@@ -409,10 +416,10 @@ def apply_column_rename_map(
     dialect: MFSQLEngine,
 ) -> str:
     """
-    Replace column references in a metric expression using the rename map.
+    Thay thế các tham chiếu cột trong câu lệnh SQL của metric bằng cách dùng rename map.
 
-    This is needed because virtual dataset columns are aliased (e.g. ``table__col``)
-    while the MetricFlow-generated expression uses the original column names.
+    Việc này là cần thiết vì các cột trong virtual dataset đã được đặt alias (ví dụ: ``table__col``)
+    trong khi đó đoạn SQL do MetricFlow sinh ra lại dùng các tên cột gốc.
     """
     if not column_rename_map:
         return expression_sql
@@ -432,7 +439,7 @@ def apply_column_rename_map(
         _logger.warning(
             "Could not parse expression for column renaming, falling back to string replacement",
         )
-        # Fallback: simple string replacement
+        # Cơ chế dự phòng (Fallback): thay thế chuỗi đơn giản
         for original, renamed in column_rename_map.items():
             expression_sql = re.sub(
                 r"\b" + re.escape(original) + r"\b",
@@ -446,14 +453,14 @@ def convert_metric_flow_to_superset(
     sl_metric: MFMetricWithSQLSchema,
 ) -> SupersetMetricDefinition:
     """
-    Convert a MetricFlow metric to a Superset metric.
+    Chuyển đổi một MetricFlow metric thành một Superset metric.
 
-    Before MetricFlow we could build the metrics based on the metadata returned by the
-    GraphQL API. With MetricFlow we only have access to the compiled SQL used to
-    compute the metric, so we need to parse it and build a single projection for
-    Superset.
+    Trước khi có MetricFlow, chúng ta có thể xây dựng các metric dựa trên metadata 
+    trả về bởi GraphQL API. Với MetricFlow, chúng ta chỉ có quyền truy cập vào câu lệnh 
+    SQL đã được biên dịch dùng để tính toán metric, vì vậy chúng ta cần phân tích nó 
+    và xây dựng một phép chiếu (projection) duy nhất cho Superset.
 
-    For example, this:
+    Ví dụ đoạn truy vấn này:
 
         SELECT
             SUM(order_count) AS large_order
@@ -465,7 +472,7 @@ def convert_metric_flow_to_superset(
         ) subq_796
         WHERE order_id__order_total_dim >= 20
 
-    Becomes:
+    Sẽ trở thành:
 
         SUM(CASE WHEN order_total > 20 THEN 1 END)
 
@@ -476,7 +483,7 @@ def convert_metric_flow_to_superset(
         sl_metric["dialect"],
     )
 
-    # Remap column names for virtual datasets (e.g. sale_amount → fact_table__sale_amount)
+    # Ánh xạ lại các tên cột cho virtual dataset (ví dụ: sale_amount → fact_table__sale_amount)
     column_rename_map = sl_metric.get("column_rename_map", {})
     if column_rename_map:
         expression = apply_column_rename_map(
@@ -502,10 +509,17 @@ def get_models_from_sql(
     model_map: Dict[ModelKey, ModelSchema],
 ) -> Optional[List[ModelSchema]]:
     """
-    Return the model associated with a SQL query.
+    Trả về model được liên kết với một câu lệnh truy vấn SQL.
     """
     parsed_query = parse_one(sql, dialect=DIALECT_MAP.get(dialect))
-    sources = list(parsed_query.find_all(Table))
+    
+    # Thu thập các tên CTE để không coi chúng là các physical model (bảng vật lý)
+    ctes = {cte.alias for cte in parsed_query.find_all(sqlglot.expressions.CTE)}
+    
+    sources = [
+        table for table in parsed_query.find_all(Table)
+        if table.name not in ctes
+    ]
 
     for table in sources:
         if ModelKey(table.db, table.name) not in model_map:
@@ -520,8 +534,8 @@ def replace_metric_syntax(
     metrics: Dict[str, OGMetricSchema],
 ) -> str:
     """
-    Replace metric keys with their SQL syntax.
-    This method is a fallback in case ``sqlglot`` raises a ``ParseError``.
+    Thay thế các khóa (keys) của metric bằng cú pháp SQL của chúng.
+    Phương thức này đóng vai trò dự phòng (fallback) trong trường hợp ``sqlglot`` ném ra một lỗi ``ParseError``.
     """
     for parent_metric in dependencies:
         parent_metric_name = parent_metric.split(".")[-1]
@@ -537,7 +551,7 @@ def replace_metric_syntax(
 
 def extract_aliases(parsed_query: Expression) -> Dict[str, str]:
     """
-    Extract column aliases from a SQL query.
+    Trích xuất các alias cột từ một câu lệnh truy vấn SQL.
     """
     aliases = {}
     for expression in parsed_query.find_all(Alias):
@@ -550,11 +564,11 @@ def extract_aliases(parsed_query: Expression) -> Dict[str, str]:
 
 def is_derived(metric: OGMetricSchema) -> bool:
     """
-    Return if the metric is derived.
+    Trả về True nếu metric là một derived metric (được dẫn xuất từ các metric khác).
     """
     return (
         metric.get("calculation_method") == "derived"  # dbt >= 1.3
         or metric.get("type") == "expression"  # dbt < 1.3
-        or metric.get("type") == "derived"  # WTF dbt Cloud
+        or metric.get("type") == "derived"  # do cú pháp kỳ cục của dbt Cloud
     )
 

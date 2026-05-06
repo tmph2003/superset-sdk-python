@@ -1,13 +1,15 @@
 """
-A command to sync dbt models/metrics to Superset and charts/dashboards back as exposures.
+Một lệnh để đồng bộ dbt models/metrics sang Superset và lưu charts/dashboards ngược lại dưới dạng exposures.
 """
 
+import copy
 import json
 import logging
 import os
 import os.path
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import concurrent.futures
 
 import click
 import yaml
@@ -109,6 +111,12 @@ _logger = logging.getLogger(__name__)
     default=False,
     help="End the execution with an error if a model fails to sync or a deprecated feature is used",
 )
+@click.option(
+    "--max-workers",
+    type=int,
+    default=3,
+    help="Maximum number of parallel workers for processing semantic layer metrics (default: 5)",
+)
 @raise_cli_errors
 @click.pass_context
 def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many-locals ,too-many-statements # noqa: C901
@@ -129,9 +137,10 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
     preserve_metadata: bool = False,
     merge_metadata: bool = False,
     raise_failures: bool = False,
+    max_workers: int = 5,
 ) -> None:
     """
-    Sync models/metrics from dbt Core to Superset and charts/dashboards to dbt exposures.
+    Đồng bộ models/metrics từ dbt Core sang Superset và charts/dashboards thành dbt exposures.
     """
     start_time = datetime.now()
     auth = ctx.obj["AUTH"]
@@ -220,7 +229,7 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
             if ModelKey(dataset["schema"], dataset["table_name"]) in model_map
         ]
     else:
-        # Build normalized select paths for filtering metrics
+        # Chuẩn hóa các đường dẫn lựa chọn để lọc metrics
         select_paths = []
         if select:
             for selection in select:
@@ -229,28 +238,29 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
                         Path(condition).as_posix().rstrip("/") + "/"
                     )
 
-        og_metrics = [] # original metrics of superset
-        sl_metrics = [] # metrics defined in the semantic layer (only for MF dialects)
+        og_metrics = [] # Các metric nguyên bản của Superset
+        sl_metrics = [] # Các metric được định nghĩa trong semantic layer (chỉ dành cho MF dialects)
+        sl_metric_configs = [] # Các metric sẽ được xử lý song song
+        
         for metric_config in configs["metrics"].values():
             if metrics and metric_config["name"] not in metrics:
                 continue
-            # Filter metrics by --select path
+            # Lọc metrics theo đường dẫn --select
             if select_paths:
                 metric_path = Path(
                     metric_config.get("original_file_path", ""),
                 ).as_posix()
                 if not any(metric_path.startswith(sp) for sp in select_paths):
                     continue
-            # dbt is shifting from `metric.meta` to `metric.config.meta`
+            # dbt đang chuyển đổi từ `metric.meta` sang `metric.config.meta`
             metric_config["meta"] = metric_config.get("meta") or metric_config.get("config", {}).get(
                 "meta",
                 {},
             )
             # Lấy công thức metrics từ superset
-            # First validate if metadata is already available
-            if metric_config["meta"].get("superset", {}).get("model") and (
-                sql := metric_config["meta"].get("superset", {}).pop("expression")
-            ):
+            # Đầu tiên kiểm tra xem metadata đã có sẵn hay chưa
+            if metric_config["meta"].get("superset", {}).get("model") and metric_config["meta"].get("superset", {}).get("expression"):
+                sql = metric_config["meta"].get("superset", {}).pop("expression")
                 metric = get_og_metric_from_config(
                     metric_config,
                     dialect,
@@ -259,17 +269,40 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
                 )
                 og_metrics.append(metric)
 
-            # dbt legacy schema
+            # Cấu trúc dbt cũ
             elif "calculation_method" in metric_config or "sql" in metric_config:
                 metric = get_og_metric_from_config(metric_config, dialect)
                 og_metrics.append(metric)
 
             # dbt semantic layer
-            # Only validate semantic layer metrics if MF dialect is specified
-            elif mf_dialect is not None and (
-                sl_metric := get_sl_metric(metric_config, model_map, mf_dialect, configs, profiles_config[profile]["outputs"][target])
-            ):
-                sl_metrics.append(sl_metric)
+            # Chỉ kiểm tra semantic layer metrics nếu MF dialect được chỉ định
+            elif mf_dialect is not None:
+                sl_metric_configs.append(metric_config)
+                
+        # Xử lý các semantic layer metrics một cách song song
+        if sl_metric_configs:
+            _logger.info("Processing %d semantic layer metrics concurrently (max_workers=%d)...", len(sl_metric_configs), max_workers)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_metric = {
+                    executor.submit(
+                        get_sl_metric,
+                        m_cfg,
+                        model_map,
+                        mf_dialect,
+                        configs,
+                        profiles_config[profile]["outputs"][target]
+                    ): m_cfg
+                    for m_cfg in sl_metric_configs
+                }
+                
+                for future in concurrent.futures.as_completed(future_to_metric):
+                    m_cfg = future_to_metric[future]
+                    try:
+                        sl_metric = future.result()
+                        if sl_metric:
+                            sl_metrics.append(sl_metric)
+                    except Exception as exc:
+                        _logger.warning("Error processing metric %s: %s", m_cfg["name"], exc)
 
         #TODO: Tìm dataset sẽ chứa derived metric & update 
         seen_virtual_models = {}
@@ -282,27 +315,26 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
                     sl_metric.get("type"),
                 )
                 model_name = sl_metric["meta"].get("ref_dataset")
-                if not model_name:
-                    raise CLIError(
-                        "Chưa đặt tên virtual dataset cho derived metric cần tạo", 1,
-                    )
                 virtual_unique_id = f"model.semantic_layer.{model_name}"
 
                 # Chỉ tạo model 1 lần cho mỗi ref_dataset
                 if model_name not in seen_virtual_models:
-                    # Build column metadata with verbose_name from column_labels
+                    # Xây dựng column metadata từ TẤT CẢ các select columns
+                    select_columns = sl_metric.get("select_columns", [])
                     column_labels = sl_metric.get("column_labels", {})
                     column_descriptions = sl_metric.get("column_descriptions", {})
-                    columns = [
-                        {
+                    columns = []
+                    for col_name in select_columns:
+                        col_meta = {}
+                        if col_name in column_labels:
+                            col_meta = {"superset": {
+                                "verbose_name": column_labels[col_name],
+                            }}
+                        columns.append({
                             "name": col_name,
                             "description": column_descriptions.get(col_name, ""),
-                            "meta": {"superset": {
-                                "verbose_name": label,
-                            }},
-                        }
-                        for col_name, label in column_labels.items()
-                    ]
+                            "meta": col_meta,
+                        })
                     model = {
                         "name": model_name,
                         "unique_id": virtual_unique_id,
@@ -321,27 +353,45 @@ def dbt_core(  # pylint: disable=too-many-arguments, too-many-branches, too-many
                     )
                 else:
                     existing_model = seen_virtual_models[model_name]
-                    if not existing_model.get("sql") and sl_metric.get("model_sql"):
-                        existing_model["sql"] = sl_metric.get("model_sql")
+                    if sl_metric.get("model_sql"):
+                        current_sql = existing_model.get("sql", "") or ""
+                        new_sql = sl_metric.get("model_sql")
+                        
+                        if not current_sql:
+                            existing_model["sql"] = new_sql
+                            _logger.debug("Set initial sql for %s (len: %d)", model_name, len(new_sql))
+                        elif "FULL OUTER JOIN" in new_sql and "FULL OUTER JOIN" not in current_sql:
+                            existing_model["sql"] = new_sql
+                            _logger.info("Overwrote sql for %s with FULL OUTER JOIN query", model_name)
+                        elif "FULL OUTER JOIN" in new_sql and "FULL OUTER JOIN" in current_sql:
+                            if new_sql.count("FULL OUTER JOIN") > current_sql.count("FULL OUTER JOIN"):
+                                existing_model["sql"] = new_sql
+                                _logger.info("Overwrote sql for %s with MORE FULL OUTER JOINs", model_name)
                     
                     existing_cols = {c["name"]: c for c in existing_model["columns"]}
-                    for col_name, label in sl_metric.get("column_labels", {}).items():
+                    merge_select_columns = sl_metric.get("select_columns", [])
+                    merge_column_labels = sl_metric.get("column_labels", {})
+                    merge_column_descriptions = sl_metric.get("column_descriptions", {})
+                    for col_name in merge_select_columns:
                         if col_name not in existing_cols:
+                            col_meta = {}
+                            if col_name in merge_column_labels:
+                                col_meta = {"superset": {"verbose_name": merge_column_labels[col_name]}}
                             new_col = {
                                 "name": col_name,
-                                "description": sl_metric.get("column_descriptions", {}).get(col_name, ""),
-                                "meta": {"superset": {"verbose_name": label}},
+                                "description": merge_column_descriptions.get(col_name, ""),
+                                "meta": col_meta,
                             }
                             existing_model["columns"].append(new_col)
                             existing_cols[col_name] = new_col
 
-                import copy
+
                 if sl_metric.get("model"):
                     virtual_metric = copy.deepcopy(sl_metric)
                     virtual_metric["model"] = virtual_unique_id
                     virtual_metrics_to_add.append(virtual_metric)
                     
-                    # Original metric will stay with the physical model, clear rename map
+                    # Metric gốc sẽ được giữ lại ở physical model, xoá bỏ rename map
                     sl_metric["column_rename_map"] = {}
                 else:
                     sl_metric["model"] = virtual_unique_id

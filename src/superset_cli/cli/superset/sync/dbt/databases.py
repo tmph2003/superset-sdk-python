@@ -1,5 +1,5 @@
 """
-Sync dbt database to Superset.
+Đồng bộ dbt database sang Superset.
 """
 
 import logging
@@ -26,7 +26,7 @@ def sync_database(  # pylint: disable=too-many-locals, too-many-arguments
     external_url_prefix: str,
 ) -> Any:
     """
-    Read target database from a dbt profiles.yml and sync to Superset.
+    Đọc target database từ một tệp dbt profiles.yml và đồng bộ sang Superset.
     """
     base_url = URL(external_url_prefix) if external_url_prefix else None
 
@@ -37,7 +37,7 @@ def sync_database(  # pylint: disable=too-many-locals, too-many-arguments
         target_name = project["target"]
     target = outputs[target_name]
 
-    # read additional metadata that should be applied to the DB
+    # Đọc thêm siêu dữ liệu (metadata) cần được áp dụng cho DB
     meta = target.get("meta", {}).get("superset", {})
 
     database_name = meta.pop("database_name", f"{project_name}_{target_name}")
