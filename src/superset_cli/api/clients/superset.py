@@ -608,7 +608,7 @@ class SupersetClient:  # pylint: disable=too-many-public-methods
         payload = self._run_query(
             database_id=kwargs["database"],
             sql=kwargs["sql"],
-            schema=kwargs["schema"],
+            schema=kwargs.get("schema", ""),
             limit=1,
         )
 
@@ -630,7 +630,7 @@ class SupersetClient:  # pylint: disable=too-many-public-methods
         payload = {
             "sql": kwargs["sql"],
             "dbId": kwargs["database"],
-            "schema": kwargs["schema"],
+            "schema": kwargs.get("schema", ""),
             "datasourceName": kwargs["table_name"],
             "columns": columns,
         }
