@@ -56,3 +56,4 @@ MANIFEST
 .pyre/
 .pyre_configuration
 .watchmanconfig
+manifest.json

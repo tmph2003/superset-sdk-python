@@ -13,7 +13,7 @@ Covers:
 
 import pytest
 
-from superset_cli.api.clients.dbt import (
+from api.clients.dbt import (
     FilterSchema,
     MFMetricSchema,
     MFMetricType,

@@ -13,8 +13,8 @@ Covers:
 
 import pytest
 
-from superset_cli.api.clients.dbt import MFSQLEngine
-from superset_cli.cli.superset.sync.dbt.metrics import convert_query_to_projection
+from api.clients.dbt import MFSQLEngine
+from cli.metrics import convert_query_to_projection
 
 
 # ---------------------------------------------------------------------------

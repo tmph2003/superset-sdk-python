@@ -1,0 +1,18 @@
+sunhouse_etl_pipeline:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: trino
+      method: none
+      user: trino
+      host: "{{ env_var('DBT_HOST', '172.16.100.161') }}"
+      port: "{{ env_var('DBT_PORT', '30346') | int }}"
+      database: "{{ env_var('DBT_DATABASE', 'dp_landing_zone') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'staging') }}"
+      threads: "{{ env_var('DBT_THREADS', '4') | int }}"
+    prod:
+      type: trino
+      user: "{{ env_var('DBT_USER') }}"
+      password: "{{ env_var('DBT_PASSWORD') }}"
+      database: "{{ env_var('DBT_DATABASE') }}"
+      host: "{{ env_var('DBT_HOST') }}"

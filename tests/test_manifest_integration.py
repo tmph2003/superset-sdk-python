@@ -22,17 +22,17 @@ from pathlib import Path
 
 import pytest
 
-from superset_cli.api.clients.dbt import (
+from api.clients.dbt import (
     MFMetricType,
     ModelSchema,
 )
-from superset_cli.cli.superset.sync.dbt.lib import (
+from cli.lib import (
     apply_select,
     build_model_fqn_lookup,
     filter_models,
     is_measurement_column,
 )
-from superset_cli.cli.superset.sync.dbt.metrics import is_derived
+from cli.metrics import is_derived
 
 
 # Path to the manifest.json in the tests directory

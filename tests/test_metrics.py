@@ -1,5 +1,5 @@
 """
-Tests for superset_cli.cli.superset.sync.dbt.metrics — metric conversion logic.
+Tests for superset_cli.cli.metrics — metric conversion logic.
 
 Covers:
   - get_metric_expression (sum, count, count_distinct, average, min, max, expression, derived)
@@ -22,9 +22,9 @@ import json
 import pytest
 from sqlglot import exp, parse_one
 
-from superset_cli.api.clients.dbt import MFSQLEngine
-from superset_cli.cli.superset.sync.dbt.exposures import ModelKey
-from superset_cli.cli.superset.sync.dbt.metrics import (
+from api.clients.dbt import MFSQLEngine
+from cli.lib import ModelKey
+from cli.metrics import (
     DIALECT_MAP,
     apply_column_rename_map,
     apply_filters,

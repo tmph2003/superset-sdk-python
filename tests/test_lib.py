@@ -2,12 +2,10 @@
 Tests for superset_cli.lib, superset_cli.exceptions, and superset_cli.api.operators.
 
 Covers:
-  - remove_root
   - setup_logging
   - deserialize_error_level
   - is_sip_40_payload
   - validate_response
-  - split_comma
   - dict_merge
   - raise_cli_errors
   - ErrorLevel, SupersetError, DatabaseNotFoundError, CLIError
@@ -21,38 +19,22 @@ from unittest.mock import MagicMock
 import click
 import pytest
 
-from superset_cli.exceptions import (
+from exceptions import (
     CLIError,
     DatabaseNotFoundError,
     ErrorLevel,
     SupersetError,
 )
-from superset_cli.lib import (
+from lib import (
     deserialize_error_level,
     dict_merge,
     is_sip_40_payload,
     raise_cli_errors,
-    remove_root,
     setup_logging,
-    split_comma,
     validate_response,
 )
-from superset_cli.api.operators import Equal, OneToMany, Operator
+from api.operators import Equal, OneToMany, Operator
 
-
-# ─── remove_root ──────────────────────────────────────────────────────────
-class TestRemoveRoot:
-    def test_simple_path(self):
-        result = remove_root("root/sub/file.txt")
-        # Path uses OS-native separators
-        assert result.replace("\\", "/") == "sub/file.txt"
-
-    def test_deep_path(self):
-        result = remove_root("a/b/c/d/e.txt")
-        assert result.replace("\\", "/") == "b/c/d/e.txt"
-
-    def test_two_parts(self):
-        assert remove_root("root/file.txt") == "file.txt"
 
 
 # ─── setup_logging ────────────────────────────────────────────────────────
@@ -153,24 +135,6 @@ class TestValidateResponse:
         with pytest.raises(SupersetError):
             validate_response(response)
 
-
-# ─── split_comma ──────────────────────────────────────────────────────────
-class TestSplitComma:
-    def test_basic_split(self):
-        ctx = MagicMock()
-        assert split_comma(ctx, "param", "a,b,c") == ["a", "b", "c"]
-
-    def test_strips_whitespace(self):
-        ctx = MagicMock()
-        assert split_comma(ctx, "param", " a , b , c ") == ["a", "b", "c"]
-
-    def test_none_returns_empty(self):
-        ctx = MagicMock()
-        assert split_comma(ctx, "param", None) == []
-
-    def test_single_value(self):
-        ctx = MagicMock()
-        assert split_comma(ctx, "param", "single") == ["single"]
 
 
 # ─── dict_merge ───────────────────────────────────────────────────────────

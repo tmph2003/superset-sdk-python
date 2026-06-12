@@ -1,5 +1,5 @@
 """
-Tests for superset_cli.cli.superset.sync.dbt.metricflow — MetricFlow output processing.
+Tests for superset_cli.cli.metricflow — MetricFlow output processing.
 
 Covers:
   - clean_mf_sql_output (ANSI stripping, non-SQL removal)
@@ -8,7 +8,7 @@ Covers:
 
 import pytest
 
-from superset_cli.cli.superset.sync.dbt.metricflow import (
+from cli.metricflow import (
     clean_mf_sql_output,
     _build_single_model_column_metadata,
 )

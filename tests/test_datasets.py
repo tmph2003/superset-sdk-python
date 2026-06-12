@@ -1,5 +1,5 @@
 """
-Tests for superset_cli.cli.superset.sync.dbt.datasets — dataset sync helpers.
+Tests for superset_cli.cli.datasets — dataset sync helpers.
 
 Covers:
   - model_in_database
@@ -17,7 +17,7 @@ import json
 import pytest
 from sqlalchemy.engine.url import make_url
 
-from superset_cli.cli.superset.sync.dbt.datasets import (
+from cli.datasets import (
     clean_metadata,
     compute_columns,
     compute_columns_metadata,
@@ -28,7 +28,7 @@ from superset_cli.cli.superset.sync.dbt.datasets import (
     no_catalog_support,
     DEFAULT_CERTIFICATION,
 )
-from superset_cli.exceptions import ErrorLevel, SupersetError
+from exceptions import ErrorLevel, SupersetError
 
 
 # ─── model_in_database ───────────────────────────────────────────────────

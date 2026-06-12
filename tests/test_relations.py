@@ -1,5 +1,5 @@
 """
-Tests for superset_cli.cli.superset.sync.dbt.relations — relation-based SQL generation.
+Tests for superset_cli.cli.relations — relation-based SQL generation.
 
 Covers:
   - _get_fqn_parts
@@ -10,12 +10,12 @@ Covers:
 
 import pytest
 
-from superset_cli.cli.superset.sync.dbt.relations import (
+from cli.relations import (
     _get_fqn_parts,
     _build_cte,
     _build_join_conditions,
 )
-from superset_cli.cli.superset.sync.dbt.exposures import ModelKey
+from cli.lib import ModelKey
 
 
 # ─── _get_fqn_parts ──────────────────────────────────────────────────────

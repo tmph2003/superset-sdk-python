@@ -2,7 +2,7 @@
 Test that MFMetricWithSQLSchema preserves model_sql and other custom fields
 through marshmallow .load().
 """
-from superset_cli.api.clients.dbt import MFMetricWithSQLSchema
+from api.clients.dbt import MFMetricWithSQLSchema
 
 mf_metric_schema = MFMetricWithSQLSchema()
 

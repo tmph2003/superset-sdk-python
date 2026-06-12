@@ -1,5 +1,5 @@
 """
-Tests for superset_cli.cli.superset.sync.dbt.lib — dbt sync helper functions.
+Tests for superset_cli.cli.lib — dbt sync helper functions.
 
 Covers:
   - env_var
@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
-from superset_cli.cli.superset.sync.dbt.lib import (
+from cli.lib import (
     apply_select,
     as_number,
     build_model_fqn_lookup,
