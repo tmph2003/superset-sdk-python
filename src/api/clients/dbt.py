@@ -66,6 +66,7 @@ class ModelSchema(PostelSchema):
     tags = fields.List(fields.String())
     columns = fields.Raw(allow_none=True)
     config = fields.Dict(fields.String(), fields.Raw(allow_none=True))
+    fqn = fields.List(fields.String(), load_default=[])
 
 
 class FilterSchema(PostelSchema):

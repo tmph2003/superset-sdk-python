@@ -69,12 +69,6 @@ _logger = logging.getLogger(__name__)
     type=click.Path(exists=True, resolve_path=True),
 )
 @click.option(
-    "--import-db",
-    is_flag=True,
-    default=False,
-    help="Import (or update) the database connection to Superset",
-)
-@click.option(
     "--disallow-edits",
     is_flag=True,
     default=False,
@@ -140,7 +134,7 @@ def main(  # pylint: disable=too-many-arguments, too-many-branches, too-many-loc
     exclude: Tuple[str, ...],
     metrics: Tuple[str, ...] = (),
     profiles: Optional[str] = None,
-    import_db: bool = False,
+
     disallow_edits: bool = False,
     external_url_prefix: str = "",
     preserve_metadata: bool = False,
@@ -184,7 +178,7 @@ def main(  # pylint: disable=too-many-arguments, too-many-branches, too-many-loc
 
     file_path = Path(file)
 
-    if "MANAGER_URL" not in ctx.obj and disallow_edits:
+    if ctx.obj is not None and "MANAGER_URL" not in ctx.obj and disallow_edits:
         warn_message = (
             "The managed externally feature was only introduced in Superset v1.5."
             "Make sure you are running a compatible version."
@@ -235,18 +229,52 @@ def main(  # pylint: disable=too-many-arguments, too-many-branches, too-many-loc
             models.append(model_schema.load(node_config))
     models = apply_select(models, select, exclude)
 
+    # ── Schema rewriting (publish_mart logic) ──────────────────────────
+    # Khi Superset target là ClickHouse nhưng dbt dùng Trino,
+    # schema trong manifest (vd: 'gold') không khớp với schema trên
+    # ClickHouse (vd: 'kinhdoanh'). Giống logic publish_mart macro:
+    #   target_schema = model.fqn[2]  khi fqn có >= 4 phần tử
+    superset_meta = profiles_config[profile]["outputs"][target].get("meta", {}).get("superset", {})
+    db_name = superset_meta.get("database_name", "")
+    is_clickhouse = "clickhouse" in db_name.lower()
+    if is_clickhouse:
+        _logger.info("ClickHouse mode detected (database_name=%s). Rewriting model schemas from fqn.", db_name)
+        for model in models:
+            old_schema = model["schema"]
+            model["_original_schema"] = old_schema
+            ch_schema = model.get("config", {}).get("clickhouse_schema")
+            fqn = model.get("fqn", [])
+            if ch_schema:
+                model["schema"] = ch_schema
+            elif len(fqn) > 3:
+                model["schema"] = fqn[2]
+            # ClickHouse không dùng catalog kiểu Trino → xóa để Superset không gửi catalog sai
+            model["database"] = None
+            if old_schema != model["schema"]:
+                _logger.debug("Schema rewrite: %s → %s for model %s", old_schema, model["schema"], model["name"])
+
     failures: List[str] = []
     superset_metrics: Dict[str, list] = {}
     model_map = {ModelKey(model["schema"], model["name"]): model for model in models}
+    # Khi ClickHouse mode, MetricFlow SQL vẫn dùng schema gốc (vd: 'gold'),
+    # cần thêm entry với schema cũ để get_models_from_sql có thể match
+    if is_clickhouse:
+        for model in models:
+            original_schema = model.get("_original_schema")
+            if original_schema and original_schema != model["schema"]:
+                model_map[ModelKey(original_schema, model["name"])] = model
 
     # Chuẩn hóa các đường dẫn lựa chọn để lọc metrics
     select_paths = []
     if select:
         for selection in select:
             for condition in selection.split(","):
-                select_paths.append(
-                    Path(condition).as_posix().rstrip("/") + "/"
-                )
+                p = Path(condition).as_posix()
+                # Nếu condition là thư mục thì thêm '/', nếu là file thì giữ nguyên
+                if p.endswith(".yml") or p.endswith(".sql"):
+                    select_paths.append(p)
+                else:
+                    select_paths.append(p.rstrip("/") + "/")
 
     og_metrics, sl_metric_configs = classify_metrics(
         configs["metrics"],
@@ -279,13 +307,15 @@ def main(  # pylint: disable=too-many-arguments, too-many-branches, too-many-loc
             project,
             profile,
             target,
-            import_db,
             disallow_edits,
             external_url_prefix,
         )
     except DatabaseNotFoundError:
-        click.echo("No database was found, pass ``--import-db`` to create")
-        return
+        raise CLIError(
+            "No database connection was found in Superset. "
+            "Please create the database connection in Superset first.",
+            1,
+        )
 
     datasets, failures = sync_datasets(
         client,

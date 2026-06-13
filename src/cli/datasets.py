@@ -77,14 +77,16 @@ def create_dataset(
     """
     kwargs = {
         "database": database["id"],
-        "catalog": model["database"],
         "schema": model["schema"] or "",
         "table_name": model.get("alias") or model["name"],
-        "sql": model.get("sql"),
     }
+    if model["database"] is not None:
+        kwargs["catalog"] = model["database"]
+    if model.get("sql"):
+        kwargs["sql"] = model["sql"]
     # Virtual datasets: catalog=None để Superset không validate physical table
     if model.get("sql") and not model.get("schema"):
-        kwargs["catalog"] = None
+        kwargs.pop("catalog", None)
     try:
         # thử tạo dataset với catalog
         return client.create_dataset(**kwargs)
@@ -419,9 +421,8 @@ def compute_dataset_metadata(  # pylint: disable=too-many-arguments
         "metrics": final_dataset_metrics,
         **model_kwargs,  # bao gồm các metadata phụ của model được định nghĩa trong model.meta.superset
     }
-    # Bao gồm câu lệnh SQL cho virtual dataset để truy vấn được cập nhật khi re-sync
-    if model.get("sql"):
-        update["sql"] = model["sql"]
+    # Bao gồm câu lệnh SQL cho virtual dataset, hoặc xóa SQL cũ để chuyển về physical
+    update["sql"] = model.get("sql") or ""
     if base_url:
         fragment = "!/model/{unique_id}".format(**model)
         update["external_url"] = str(base_url.with_fragment(fragment))

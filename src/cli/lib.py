@@ -45,6 +45,8 @@ def build_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
         return build_bigquery_sqlalchemy_params(target)
     if type_ == "snowflake":
         return build_snowflake_sqlalchemy_params(target)
+    if type_ == "trino":
+        return build_trino_sqlalchemy_params(target)
 
     raise NotImplementedError(
         f"Unable to build a SQLAlchemy URI for a target of type {type_}. Please file an "
@@ -208,6 +210,27 @@ def build_snowflake_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     return parameters
+
+
+def build_trino_sqlalchemy_params(target: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Xây dựng SQLAlchemy URI cho một target Trino.
+    """
+    username = target.get("user", "")
+    password = target.get("password", "")
+    host = target["host"]
+    port = target.get("port", 8080)
+    catalog = target.get("database", "")
+
+    auth = ""
+    if username and password:
+        auth = f"{username}:{password}@"
+    elif username:
+        auth = f"{username}@"
+
+    return {
+        "sqlalchemy_uri": f"trino://{auth}{host}:{port}/{catalog}"
+    }
 
 
 def create_engine_with_check(url: URL) -> Engine:
